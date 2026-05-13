@@ -44,11 +44,12 @@ pub fn main() !void {
 }
 
 fn openWindow(title: [:0]const u8) struct { window: Window, w: i32, h: i32 } {
-    // WINDOW_HIDDEN keeps the probe window off-screen during sizing. HIGHDPI is
-    // *not* enabled: when it is on macOS, the framebuffer doubles vs. the GLFW
-    // point grid we measure with `getMonitorWidth/Height`, so drawing at point
-    // coordinates lands in the upper-left quadrant of the actual canvas.
-    rl.setConfigFlags(.{ .window_hidden = true });
+    // HIGHDPI must be set before initWindow to take effect. WINDOW_HIDDEN keeps
+    // the probe window off-screen during sizing.
+    rl.setConfigFlags(.{
+        .window_highdpi = true,
+        .window_hidden = true,
+    });
     const window = Window.init(title, 1, 1);
 
     const monitor = rl.getCurrentMonitor();

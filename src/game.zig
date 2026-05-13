@@ -117,7 +117,7 @@ pub const Game = struct {
         self.shake.update(frame_dt);
         self.audio.updateMusic(frame_dt);
         _ = self.audio.flush();
-        self.draw();
+        self.drawCurrent();
     }
 
     fn framePlaying(self: *Game, p: *Playing) !void {
@@ -180,21 +180,51 @@ pub const Game = struct {
     }
 
     fn drawCurrent(self: *Game) void {
+        // Render dims come from raylib so HIGHDPI Retina framebuffers scale up
+        // correctly. The Camera2D zoom (render_h / bounds.h) maps world points
+        // to the actual pixel grid; HUD / overlays are drawn outside the camera
+        // at pixel coordinates from getRenderWidth/Height.
+        const rw = rl.getRenderWidth();
+        const rh = rl.getRenderHeight();
+        const zoom = @as(f32, @floatFromInt(rh)) / self.world.bounds.height;
+        const off = self.shake.offset();
+
+        rl.beginDrawing();
+        defer rl.endDrawing();
+        rl.clearBackground(rl.Color.black);
+
         switch (self.state) {
-            .attract => self.draw(),
-            .playing => |p| {
-                self.draw();
-                drawHud(self.window_w, p);
+            .attract => {
+                drawAttract(rw, rh);
+                return;
             },
+            else => {},
+        }
+
+        const camera: rl.Camera2D = .{
+            .offset = .{ .x = off.x, .y = off.y },
+            .target = .{ .x = 0, .y = 0 },
+            .rotation = 0,
+            .zoom = zoom,
+        };
+        {
+            camera.begin();
+            defer camera.end();
+            drawEnemies(&self.world);
+            drawBullets(&self.world);
+            drawEnemyBullets(&self.world);
+            drawParticles(&self.world);
+            if (!self.world.player.dead) drawPlayer(&self.world);
+        }
+
+        switch (self.state) {
+            .playing => |p| drawHud(rw, p),
             .paused => |p| {
-                self.draw();
-                drawHud(self.window_w, p);
-                drawPausedOverlay(self.window_w, self.window_h);
+                drawHud(rw, p);
+                drawPausedOverlay(rw, rh);
             },
-            .game_over => |g| {
-                self.draw();
-                drawGameOverOverlay(self.window_w, self.window_h, g);
-            },
+            .game_over => |g| drawGameOverOverlay(rw, rh, g),
+            .attract => unreachable,
         }
     }
 
@@ -275,37 +305,6 @@ pub const Game = struct {
             }
         }
         return gated;
-    }
-
-    fn draw(self: *Game) void {
-        const off = self.shake.offset();
-        const camera: rl.Camera2D = .{
-            .offset = .{ .x = off.x, .y = off.y },
-            .target = .{ .x = 0, .y = 0 },
-            .rotation = 0,
-            .zoom = 1,
-        };
-
-        rl.beginDrawing();
-        defer rl.endDrawing();
-        rl.clearBackground(rl.Color.black);
-
-        switch (self.state) {
-            .attract => {
-                drawAttract(self.window_w, self.window_h);
-                return;
-            },
-            else => {},
-        }
-
-        camera.begin();
-        defer camera.end();
-
-        drawEnemies(&self.world);
-        drawBullets(&self.world);
-        drawEnemyBullets(&self.world);
-        drawParticles(&self.world);
-        if (!self.world.player.dead) drawPlayer(&self.world);
     }
 };
 
