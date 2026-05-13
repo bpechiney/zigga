@@ -142,6 +142,7 @@ pub fn collide(world: *World, audio: *Audio, shake: *Shake) void {
                 audio.emit(.enemy_explode, 0);
                 spawnBurst(world, enemy.pos, 16, 220, random, .{ .r = 255, .g = 120, .b = 60, .a = 255 }, 0.6);
                 shake.kick(0.35);
+                world.kills_by_kind.set(enemy.kind, world.kills_by_kind.get(enemy.kind) + 1);
                 world.enemies.kill(.{ .index = ei, .generation = world.enemies.generations[ei] });
                 break;
             }

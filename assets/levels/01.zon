@@ -1,0 +1,21 @@
+.{
+    .name = "Wave 1",
+    .enemy_count = 12,
+    .formation = .{
+        .{ .home = .{ .x = 200, .y = 100 }, .kind_index = 2 },
+        .{ .home = .{ .x = 280, .y = 100 }, .kind_index = 2 },
+        .{ .home = .{ .x = 360, .y = 100 }, .kind_index = 2 },
+        .{ .home = .{ .x = 440, .y = 100 }, .kind_index = 2 },
+        .{ .home = .{ .x = 200, .y = 160 }, .kind_index = 1 },
+        .{ .home = .{ .x = 280, .y = 160 }, .kind_index = 1 },
+        .{ .home = .{ .x = 360, .y = 160 }, .kind_index = 1 },
+        .{ .home = .{ .x = 440, .y = 160 }, .kind_index = 1 },
+        .{ .home = .{ .x = 200, .y = 220 }, .kind_index = 0 },
+        .{ .home = .{ .x = 280, .y = 220 }, .kind_index = 0 },
+        .{ .home = .{ .x = 360, .y = 220 }, .kind_index = 0 },
+        .{ .home = .{ .x = 440, .y = 220 }, .kind_index = 0 },
+    },
+    .enemy_kinds = .{ .grunt, .zako, .goei },
+    .dive_interval = 4.0,
+    .music_track = .level_1,
+}

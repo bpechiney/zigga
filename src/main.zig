@@ -39,7 +39,7 @@ pub fn main() !void {
     if (rl.isAudioDeviceReady()) game.audio.enablePlayback();
 
     while (!rl.windowShouldClose()) {
-        game.frame();
+        try game.frame();
     }
 }
 

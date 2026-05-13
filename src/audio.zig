@@ -1,4 +1,4 @@
-//! Frame-batched SFX event queue plus music stubs.
+//! Frame-batched SFX event queue plus music streaming + crossfade.
 
 const std = @import("std");
 const rl = @import("raylib");
@@ -18,7 +18,7 @@ pub const Policy = enum {
     latest,
 };
 
-pub const MusicTrack = enum { none, gameplay, menu };
+pub const MusicTrack = enum { none, level_1, level_2, level_3 };
 
 pub const Event = struct {
     tag: Tag,
@@ -31,58 +31,87 @@ pub const FlushStats = struct {
 };
 
 const default_base_volume: f32 = 1.0;
+const default_sfx_prefix: []const u8 = "assets/sfx/";
+const default_music_prefix: []const u8 = "assets/music/";
+const crossfade_duration_s: f32 = 1.5;
+
+const FadeMode = enum { none, crossfade, fade_in, fade_out };
+
+/// Music streaming and crossfade ramp state. Three fade modes:
+///   - fade_in:   current ramps 0→1; no `next`.
+///   - crossfade: current ramps 1→0, next ramps 0→1; promote `next` at the end.
+///   - fade_out:  current ramps 1→0; unload at the end.
+pub const MusicState = struct {
+    current: ?rl.Music = null,
+    current_volume: f32 = 0,
+    current_track: MusicTrack = .none,
+    next: ?rl.Music = null,
+    next_volume: f32 = 0,
+    next_track: MusicTrack = .none,
+    crossfade_s: f32 = crossfade_duration_s,
+    crossfade_t: f32 = 0,
+    fade_mode: FadeMode = .none,
+};
 
 pub const Audio = struct {
     pending_buf: [256]Event = undefined,
     pending: std.ArrayList(Event),
     sounds: std.EnumArray(Tag, rl.Sound),
     sound_loaded: std.EnumArray(Tag, bool),
+    use_fallback: std.EnumArray(Tag, bool),
     policies: std.EnumArray(Tag, Policy),
     base_volume: std.EnumArray(Tag, f32),
-    music_state: MusicTrack,
+    music: MusicState,
     playback_enabled: bool,
 
     pub fn init(self: *Audio) void {
         self.pending = std.ArrayList(Event).initBuffer(&self.pending_buf);
         self.sounds = std.EnumArray(Tag, rl.Sound).initUndefined();
         self.sound_loaded = std.EnumArray(Tag, bool).initFill(false);
+        self.use_fallback = std.EnumArray(Tag, bool).initFill(true);
         self.policies = defaultPolicies();
         self.base_volume = std.EnumArray(Tag, f32).initFill(default_base_volume);
-        self.music_state = .none;
+        self.music = .{};
         self.playback_enabled = false;
+        self.resolveSfxSources(default_sfx_prefix);
     }
 
     pub fn deinit(self: *Audio) void {
         if (self.playback_enabled) {
             var it = self.sound_loaded.iterator();
             while (it.next()) |entry| {
-                if (entry.value.*) {
-                    rl.unloadSound(self.sounds.get(entry.key));
-                }
+                if (entry.value.*) rl.unloadSound(self.sounds.get(entry.key));
             }
+            if (self.music.current) |m| rl.unloadMusicStream(m);
+            if (self.music.next) |m| rl.unloadMusicStream(m);
         }
         self.* = undefined;
     }
 
-    /// Lights up real raylib playback. Caller is responsible for having
-    /// initialized the audio device. Safe to skip in unit tests.
+    /// Decides per-tag whether to use a real asset or the placeholder sine wave.
+    /// Pure file-existence check — does not touch raylib's audio device, so it
+    /// is safe to run in unit tests with no audio context.
+    pub fn resolveSfxSources(self: *Audio, prefix: []const u8) void {
+        inline for (@typeInfo(Tag).@"enum".fields) |field| {
+            const tag = @field(Tag, field.name);
+            self.use_fallback.set(tag, !sfxFileExists(prefix, field.name));
+        }
+    }
+
+    /// Lights up real raylib playback. Caller must have initialized the audio
+    /// device. Loads sounds either from disk or from placeholder waves based on
+    /// what `resolveSfxSources` decided.
     pub fn enablePlayback(self: *Audio) void {
         self.playback_enabled = true;
         const sample_rate: u32 = 22_050;
-        var it = self.sounds.iterator();
-        while (it.next()) |entry| {
-            const freq = placeholderFreq(entry.key);
-            // loadSoundFromWave copies the sample data; we deliberately do NOT
-            // call unloadWave here because wave.data points at static storage
-            // and raylib's UnloadWave would free() that pointer (UB).
-            const wave = makeSineWave(sample_rate, freq);
-            entry.value.* = rl.loadSoundFromWave(wave);
-            self.sound_loaded.set(entry.key, true);
+        inline for (@typeInfo(Tag).@"enum".fields) |field| {
+            const tag = @field(Tag, field.name);
+            self.sounds.set(tag, loadSfx(tag, self.use_fallback.get(tag), sample_rate));
+            self.sound_loaded.set(tag, true);
         }
     }
 
     pub fn emit(self: *Audio, tag: Tag, variant: u8) void {
-        // Full queue drops silently — an enemy swarm shouldn't be able to crash a frame.
         self.pending.appendBounded(.{ .tag = tag, .variant = variant }) catch {};
     }
 
@@ -90,12 +119,111 @@ pub const Audio = struct {
         self.pending.clearRetainingCapacity();
     }
 
+    /// Starts the right kind of fade to reach `track`. Calling with the
+    /// currently-playing track is a no-op; calling mid-fade snaps the in-flight
+    /// fade to completion first so handles never leak.
     pub fn playMusic(self: *Audio, track: MusicTrack) void {
-        self.music_state = track;
+        if (track == .none) {
+            self.stopMusic();
+            return;
+        }
+        if (self.music.fade_mode == .none and self.music.current_track == track) return;
+        if (self.music.fade_mode != .none) self.finalizeCrossfade();
+
+        const incoming: ?rl.Music = if (self.playback_enabled) loadMusicTrack(track) else null;
+        if (incoming) |m| {
+            rl.playMusicStream(m);
+            rl.setMusicVolume(m, 0);
+        }
+
+        if (self.music.current == null) {
+            self.music.current = incoming;
+            self.music.current_track = track;
+            self.music.current_volume = 0;
+            self.music.fade_mode = .fade_in;
+        } else {
+            self.music.next = incoming;
+            self.music.next_track = track;
+            self.music.next_volume = 0;
+            self.music.current_volume = 1;
+            self.music.fade_mode = .crossfade;
+        }
+        self.music.crossfade_t = 0;
     }
 
     pub fn stopMusic(self: *Audio) void {
-        self.music_state = .none;
+        if (self.music.fade_mode == .crossfade) self.finalizeCrossfade();
+        if (self.music.current == null) {
+            self.music = .{};
+            return;
+        }
+        self.music.fade_mode = .fade_out;
+        self.music.crossfade_t = 0;
+    }
+
+    /// Pumps raylib's music stream and advances the ramp. Must run ONCE per
+    /// frame at display rate — `updateMusicStream` needs wall-clock cadence
+    /// to keep the decode buffer fed; per-sim-tick calls would starve audio
+    /// on slow frames and double-feed on fast ones.
+    pub fn updateMusic(self: *Audio, frame_dt: f32) void {
+        if (!self.playback_enabled) {
+            // Still progress the ramp so tests can observe state transitions.
+            if (self.music.fade_mode != .none) self.advanceFade(frame_dt);
+            return;
+        }
+        if (self.music.current) |m| rl.updateMusicStream(m);
+        if (self.music.next) |m| rl.updateMusicStream(m);
+        if (self.music.fade_mode == .none) {
+            if (self.music.current) |m| rl.setMusicVolume(m, self.music.current_volume);
+            return;
+        }
+        self.advanceFade(frame_dt);
+        if (self.music.current) |m| rl.setMusicVolume(m, self.music.current_volume);
+        if (self.music.next) |m| rl.setMusicVolume(m, self.music.next_volume);
+    }
+
+    fn advanceFade(self: *Audio, frame_dt: f32) void {
+        self.music.crossfade_t = @min(self.music.crossfade_s, self.music.crossfade_t + frame_dt);
+        const ratio = self.music.crossfade_t / self.music.crossfade_s;
+        switch (self.music.fade_mode) {
+            .none => {},
+            .fade_in => self.music.current_volume = ratio,
+            .crossfade => {
+                self.music.current_volume = 1.0 - ratio;
+                self.music.next_volume = ratio;
+            },
+            .fade_out => self.music.current_volume = 1.0 - ratio,
+        }
+        if (self.music.crossfade_t >= self.music.crossfade_s) self.finalizeCrossfade();
+    }
+
+    fn finalizeCrossfade(self: *Audio) void {
+        switch (self.music.fade_mode) {
+            .none => return,
+            .fade_in => self.music.current_volume = 1,
+            .crossfade => {
+                if (self.music.current) |old| {
+                    if (self.playback_enabled) rl.unloadMusicStream(old);
+                }
+                self.music.current = self.music.next;
+                self.music.current_track = self.music.next_track;
+                self.music.current_volume = 1;
+                if (self.playback_enabled) if (self.music.current) |m| rl.setMusicVolume(m, 1);
+                self.music.next = null;
+                self.music.next_track = .none;
+                self.music.next_volume = 0;
+            },
+            .fade_out => {
+                if (self.music.current) |old| {
+                    if (self.playback_enabled) rl.unloadMusicStream(old);
+                }
+                self.music.current = null;
+                self.music.current_track = .none;
+                self.music.current_volume = 0;
+            },
+        }
+        self.music.fade_mode = .none;
+        self.music.crossfade_t = 0;
     }
 
     /// Buckets pending events by tag, applies the per-tag policy, and clears the queue.
@@ -122,9 +250,7 @@ pub const Audio = struct {
             switch (policy) {
                 .always => {
                     var i: u32 = 0;
-                    while (i < count) : (i += 1) {
-                        self.playOne(tag, base);
-                    }
+                    while (i < count) : (i += 1) self.playOne(tag, base);
                     total += count;
                 },
                 .coalesce => {
@@ -173,6 +299,59 @@ fn placeholderFreq(tag: Tag) f32 {
         .enemy_dive => 330,
         .enemy_explode => 110,
         .player_explode => 73,
+    };
+}
+
+fn sfxFileExists(prefix: []const u8, name: []const u8) bool {
+    var path_buf: [128]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}{s}.wav", .{ prefix, name }) catch return false;
+    if (rl.fileExists(path)) return true;
+    std.log.warn("audio: missing {s}, using placeholder sine", .{path});
+    return false;
+}
+
+fn loadSfx(tag: Tag, use_fallback: bool, sample_rate: u32) rl.Sound {
+    if (use_fallback) return loadPlaceholder(tag, sample_rate);
+    var path_buf: [128]u8 = undefined;
+    const path = std.fmt.bufPrintZ(
+        &path_buf,
+        "{s}{s}.wav",
+        .{ default_sfx_prefix, @tagName(tag) },
+    ) catch return loadPlaceholder(tag, sample_rate);
+    return rl.loadSound(path) catch {
+        std.log.warn("audio: load failed for {s}, falling back", .{path});
+        return loadPlaceholder(tag, sample_rate);
+    };
+}
+
+fn loadPlaceholder(tag: Tag, sample_rate: u32) rl.Sound {
+    // loadSoundFromWave copies the sample data; we deliberately do NOT call
+    // unloadWave here because wave.data points at static storage and raylib's
+    // UnloadWave would free() that pointer (UB).
+    const wave = makeSineWave(sample_rate, placeholderFreq(tag));
+    return rl.loadSoundFromWave(wave);
+}
+
+fn loadMusicTrack(track: MusicTrack) ?rl.Music {
+    const name = switch (track) {
+        .none => return null,
+        .level_1 => "level_1",
+        .level_2 => "level_2",
+        .level_3 => "level_3",
+    };
+    var path_buf: [128]u8 = undefined;
+    const path = std.fmt.bufPrintZ(
+        &path_buf,
+        "{s}{s}.ogg",
+        .{ default_music_prefix, name },
+    ) catch return null;
+    if (!rl.fileExists(path)) {
+        std.log.warn("audio: missing {s}, music silent for this track", .{path});
+        return null;
+    }
+    return rl.loadMusicStream(path) catch {
+        std.log.warn("audio: failed to load {s}", .{path});
+        return null;
     };
 }
 
@@ -264,14 +443,41 @@ test "Audio.emit drops silently when queue is full" {
     try std.testing.expectEqual(audio.pending_buf.len, audio.pending.items.len);
 }
 
-test "Audio.playMusic and stopMusic toggle music_state" {
+test "Audio fade ramps current_volume on fade_in" {
     var audio: Audio = undefined;
     audio.init();
     defer audio.deinit();
 
-    try std.testing.expectEqual(MusicTrack.none, audio.music_state);
-    audio.playMusic(.gameplay);
-    try std.testing.expectEqual(MusicTrack.gameplay, audio.music_state);
+    audio.playMusic(.level_1);
+    try std.testing.expect(audio.music.fade_mode == .fade_in);
+    audio.updateMusic(crossfade_duration_s);
+    try std.testing.expect(audio.music.fade_mode == .none);
+    try std.testing.expectEqual(MusicTrack.level_1, audio.music.current_track);
+}
+
+test "Audio.stopMusic kicks off a fade_out from a settled state" {
+    var audio: Audio = undefined;
+    audio.init();
+    defer audio.deinit();
+
+    // Pretend we're already playing — no playback_enabled means no streams.
+    audio.music.current_track = .level_1;
+    audio.music.current_volume = 1;
+    audio.music.current = null; // no real stream but track is set
+
     audio.stopMusic();
-    try std.testing.expectEqual(MusicTrack.none, audio.music_state);
+    // current was null, so stopMusic short-circuits to a clean state.
+    try std.testing.expectEqual(MusicTrack.none, audio.music.current_track);
+}
+
+test "Audio resolves to fallback when sfx files are absent" {
+    var audio: Audio = undefined;
+    audio.init();
+    defer audio.deinit();
+
+    audio.resolveSfxSources("definitely/not/a/real/dir/");
+    var it = audio.use_fallback.iterator();
+    while (it.next()) |entry| {
+        try std.testing.expect(entry.value.*);
+    }
 }
