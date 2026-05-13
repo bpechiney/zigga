@@ -1,0 +1,11 @@
+.{
+    .name = .apple_sdk,
+    .version = "0.0.0",
+    .fingerprint = 0xdde528608ac66551,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+}

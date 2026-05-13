@@ -1,0 +1,29 @@
+* text=auto eol=lf
+
+# Zig source and build metadata
+*.zig text eol=lf
+*.zon text eol=lf
+
+# Shell scripts and project config
+*.sh text eol=lf
+*.bash text eol=lf
+justfile text eol=lf
+.envrc text eol=lf
+
+# Common binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.xz binary
+*.7z binary
+
+# Generated build output should not be diffed if force-added.
+zig-out/** -diff
+.zig-cache/** -diff

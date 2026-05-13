@@ -1,0 +1,52 @@
+# Build Artifacts
+.zig-cache/
+zig-out/
+zig-pkg/
+*.o
+
+# direnv
+.direnv/
+
+# Nix build results (symlink)
+result
+result-*
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Secrets / Credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.jks
+credentials.json
+secrets.json
+*.secret
+.secrets/
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# Claude Code per-machine runtime locks (e.g. /schedule skill)
+.claude/scheduled_tasks.lock
+
+# Logs
+*.log
