@@ -180,19 +180,20 @@ pub const Game = struct {
     }
 
     fn drawCurrent(self: *Game) void {
-        // World, HUD, and overlay coords are all GLFW screen coordinates
-        // (points). With HIGHDPI on macOS Retina, raylib's draw pipeline handles
-        // the upscale to the framebuffer internally — measureText and drawText
-        // both speak points, so centering math uses window_w/window_h (points),
-        // not getRenderWidth/Height (pixels). Don't reintroduce a Camera2D zoom
-        // here: world entities are authored in points already, so a zoom would
-        // push them past the visible canvas. Shake offset is points too.
+        // raylib on macOS HIGHDPI uses two coord systems at once: shapes (and the
+        // Camera2D transform) operate in framebuffer PIXELS; drawText/measureText
+        // operate in POINTS. So we zoom the world's point coords up to pixels
+        // inside the camera, and pass window_w/window_h (points) to text-based
+        // overlays for correct centering. Full-screen dim rectangles use
+        // getRenderWidth/Height (pixels) since drawRectangle is a shape.
+        const rh = rl.getRenderHeight();
+        const zoom = @as(f32, @floatFromInt(rh)) / self.world.bounds.height;
         const off = self.shake.offset();
         const camera: rl.Camera2D = .{
             .offset = .{ .x = off.x, .y = off.y },
             .target = .{ .x = 0, .y = 0 },
             .rotation = 0,
-            .zoom = 1,
+            .zoom = zoom,
         };
 
         rl.beginDrawing();
@@ -415,7 +416,8 @@ fn drawHud(window_w: i32, p: Playing) void {
 
 fn drawPausedOverlay(window_w: i32, window_h: i32) void {
     const dim = rl.Color.init(0, 0, 0, 128);
-    rl.drawRectangle(0, 0, window_w, window_h, dim);
+    // Full-canvas dim: drawRectangle is a shape, so size in framebuffer pixels.
+    rl.drawRectangle(0, 0, rl.getRenderWidth(), rl.getRenderHeight(), dim);
 
     const text = "PAUSED";
     const size: i32 = 64;
@@ -425,7 +427,7 @@ fn drawPausedOverlay(window_w: i32, window_h: i32) void {
 
 fn drawGameOverOverlay(window_w: i32, window_h: i32, g: GameOver) void {
     const dim = rl.Color.init(0, 0, 0, 180);
-    rl.drawRectangle(0, 0, window_w, window_h, dim);
+    rl.drawRectangle(0, 0, rl.getRenderWidth(), rl.getRenderHeight(), dim);
 
     const title = "GAME OVER";
     const title_size: i32 = 72;
