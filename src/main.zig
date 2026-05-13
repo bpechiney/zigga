@@ -29,9 +29,14 @@ pub fn main() !void {
     const opened = openWindow("zigga");
     defer opened.window.deinit();
 
+    rl.initAudioDevice();
+    defer rl.closeAudioDevice();
+
     var game: zigga.game.Game = undefined;
     try game.init(gpa, zigga.world.WorldCaps.defaults, opened.w, opened.h, default_seed);
     defer game.deinit();
+
+    if (rl.isAudioDeviceReady()) game.audio.enablePlayback();
 
     while (!rl.windowShouldClose()) {
         game.frame();
