@@ -2,7 +2,6 @@
 
 const std = @import("std");
 
-const game = @import("game.zig");
 const math = @import("math.zig");
 const world_mod = @import("world.zig");
 
@@ -10,7 +9,7 @@ const Vec2 = math.Vec2;
 
 test "replay determinism" {
     const seed: u64 = 0xA11CE;
-    const caps: world_mod.WorldCaps = .{ .bullet_cap = 64 };
+    const caps: world_mod.WorldCaps = .{ .bullet_cap = 16 };
 
     var prng_a = std.Random.DefaultPrng.init(seed);
     var world_a = try world_mod.World.init(std.testing.allocator, caps, &prng_a);
@@ -20,13 +19,16 @@ test "replay determinism" {
     var world_b = try world_mod.World.init(std.testing.allocator, caps, &prng_b);
     defer world_b.deinit(std.testing.allocator);
 
+    var hit_cap = false;
     var tick: u32 = 0;
     while (tick < 600) : (tick += 1) {
         const input = inputAt(tick);
-        world_a.simTick(input, game.sim_dt);
-        world_b.simTick(input, game.sim_dt);
+        world_a.simTick(input, world_mod.sim_dt);
+        world_b.simTick(input, world_mod.sim_dt);
+        hit_cap = hit_cap or world_a.bullets.len() == caps.bullet_cap;
         try expectWorldsEqual(&world_a, &world_b);
     }
+    try std.testing.expect(hit_cap);
 }
 
 fn inputAt(tick: u32) world_mod.Input {
@@ -42,7 +44,7 @@ fn inputAt(tick: u32) world_mod.Input {
     };
     return .{
         .thrust = Vec2{ .x = horizontal, .y = vertical },
-        .fire = tick % 7 == 0,
+        .fire = tick % 2 == 0,
     };
 }
 

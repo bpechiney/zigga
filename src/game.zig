@@ -8,7 +8,7 @@ const world_mod = @import("world.zig");
 
 const Vec2 = math.Vec2;
 
-pub const sim_dt: f32 = 1.0 / 60.0;
+pub const sim_dt: f32 = world_mod.sim_dt;
 const max_ticks_per_frame: u32 = 5;
 const player_size: f32 = 20.0;
 
@@ -17,10 +17,11 @@ pub const Shake = struct {};
 
 pub const Game = struct {
     gpa: std.mem.Allocator,
+    // Present from the first milestone to pin allocator ownership boundaries.
     frame_arena: std.heap.ArenaAllocator,
     perm_arena: std.heap.ArenaAllocator,
-    sim_prng: std.Random.DefaultPrng,
-    shake_prng: std.Random.DefaultPrng,
+    sim_prng: *std.Random.DefaultPrng,
+    shake_prng: *std.Random.DefaultPrng,
     world: world_mod.World,
     input: world_mod.Input,
     accumulator: f32,
@@ -41,9 +42,15 @@ pub const Game = struct {
         self.perm_arena = std.heap.ArenaAllocator.init(gpa);
         errdefer self.perm_arena.deinit();
 
-        self.sim_prng = std.Random.DefaultPrng.init(seed);
-        self.shake_prng = std.Random.DefaultPrng.init(seed +% 0x9E37_79B9_7F4A_7C15);
-        self.world = try world_mod.World.init(gpa, caps, &self.sim_prng);
+        self.sim_prng = try gpa.create(std.Random.DefaultPrng);
+        errdefer gpa.destroy(self.sim_prng);
+        self.sim_prng.* = std.Random.DefaultPrng.init(seed);
+
+        self.shake_prng = try gpa.create(std.Random.DefaultPrng);
+        errdefer gpa.destroy(self.shake_prng);
+        self.shake_prng.* = std.Random.DefaultPrng.init(seed +% 0x9E37_79B9_7F4A_7C15);
+
+        self.world = try world_mod.World.init(gpa, caps, self.sim_prng);
         errdefer self.world.deinit(gpa);
 
         self.world.player.pos = .{
@@ -58,6 +65,8 @@ pub const Game = struct {
 
     pub fn deinit(self: *Game) void {
         self.world.deinit(self.gpa);
+        self.gpa.destroy(self.shake_prng);
+        self.gpa.destroy(self.sim_prng);
         self.perm_arena.deinit();
         self.frame_arena.deinit();
         self.* = undefined;
@@ -66,18 +75,22 @@ pub const Game = struct {
     pub fn frame(self: *Game) void {
         _ = self.frame_arena.reset(.retain_capacity);
         self.input = pollInput();
-        const dt = std.math.clamp(rl.getFrameTime(), 0, sim_dt * max_ticks_per_frame);
-        self.accumulator += dt;
+        _ = self.runSimTicks(self.input, rl.getFrameTime());
 
+        drawWorld(&self.world);
+    }
+
+    fn runSimTicks(self: *Game, input: world_mod.Input, frame_dt: f32) u32 {
+        const dt = std.math.clamp(frame_dt, 0, sim_dt * max_ticks_per_frame);
+        self.accumulator += dt;
         var ticks: u32 = 0;
         while (self.accumulator >= sim_dt and ticks < max_ticks_per_frame) {
-            self.world.simTick(self.input, sim_dt);
+            self.world.simTick(input, sim_dt);
             self.accumulator -= sim_dt;
             ticks += 1;
         }
         if (ticks == max_ticks_per_frame) self.accumulator = 0;
-
-        drawWorld(&self.world);
+        return ticks;
     }
 };
 
@@ -87,6 +100,7 @@ fn pollInput() world_mod.Input {
     if (rl.isKeyDown(.s)) thrust.y += 1;
     if (rl.isKeyDown(.a)) thrust.x -= 1;
     if (rl.isKeyDown(.d)) thrust.x += 1;
+    // Firing is intentionally unbound in this milestone; tests drive bullets directly.
     return .{ .thrust = thrust, .fire = false };
 }
 
@@ -102,4 +116,16 @@ fn drawWorld(world: *const world_mod.World) void {
         .{ .x = pos.x + player_size, .y = pos.y + player_size },
         rl.Color.white,
     );
+}
+
+test "runSimTicks caps catch-up after a large frame stall" {
+    var game: Game = undefined;
+    try game.init(std.testing.allocator, .{ .bullet_cap = 4 }, 800, 600, 123);
+    defer game.deinit();
+
+    const ticks = game.runSimTicks(.{ .thrust = .{ .x = 1, .y = 0 }, .fire = false }, 1);
+
+    try std.testing.expectEqual(@as(u32, max_ticks_per_frame), ticks);
+    try std.testing.expectEqual(@as(f32, 0), game.accumulator);
+    try std.testing.expectApproxEqAbs(@as(f32, 425), game.world.player.pos.x, 0.000_001);
 }

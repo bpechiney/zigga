@@ -7,7 +7,8 @@ const Pool = @import("pool.zig").Pool;
 
 const Vec2 = math.Vec2;
 
-pub const player_speed: f32 = 300;
+pub const sim_dt: f32 = 1.0 / 60.0;
+const player_speed: f32 = 300;
 const bullet_speed: f32 = 500;
 const bullet_lifetime: f32 = 2;
 
@@ -55,17 +56,17 @@ pub const World = struct {
         self.* = undefined;
     }
 
-    pub fn simTick(self: *World, input: Input, sim_dt: f32) void {
-        self.updatePlayer(input, sim_dt);
+    pub fn simTick(self: *World, input: Input, dt: f32) void {
+        self.updatePlayer(input, dt);
         if (input.fire) self.fireBullet();
-        self.updateBullets(sim_dt);
+        self.updateBullets(dt);
         self.bullets.sweep();
     }
 
-    fn updatePlayer(self: *World, input: Input, sim_dt: f32) void {
+    fn updatePlayer(self: *World, input: Input, dt: f32) void {
         const thrust = clampToUnit(input.thrust);
         self.player.vel = thrust.scale(player_speed);
-        self.player.pos = self.player.pos.add(self.player.vel.scale(sim_dt));
+        self.player.pos = self.player.pos.add(self.player.vel.scale(dt));
     }
 
     fn fireBullet(self: *World) void {
@@ -78,12 +79,12 @@ pub const World = struct {
         });
     }
 
-    fn updateBullets(self: *World, sim_dt: f32) void {
+    fn updateBullets(self: *World, dt: f32) void {
         var iter = self.bullets.iter();
         while (iter.next()) |index| {
             var bullet = self.bullets.rows.get(index);
-            bullet.pos = bullet.pos.add(bullet.vel.scale(sim_dt));
-            bullet.lifetime -= sim_dt;
+            bullet.pos = bullet.pos.add(bullet.vel.scale(dt));
+            bullet.lifetime -= dt;
             self.bullets.rows.set(index, bullet);
             if (bullet.lifetime <= 0) {
                 self.bullets.kill(.{
@@ -106,9 +107,36 @@ test "simTick moves player and bullets" {
     var world = try World.init(std.testing.allocator, .{ .bullet_cap = 4 }, &prng);
     defer world.deinit(std.testing.allocator);
 
-    world.simTick(.{ .thrust = .{ .x = 2, .y = 0 }, .fire = true }, 1.0 / 60.0);
+    world.simTick(.{ .thrust = .{ .x = 2, .y = 0 }, .fire = true }, sim_dt);
 
     try std.testing.expectApproxEqAbs(@as(f32, 5), world.player.pos.x, 0.000_001);
     try std.testing.expectApproxEqAbs(@as(f32, 0), world.player.pos.y, 0.000_001);
     try std.testing.expectEqual(@as(u32, 1), world.bullets.len());
+}
+
+test "clampToUnit preserves boundary and small vectors" {
+    try std.testing.expectEqual(Vec2{ .x = 1, .y = 0 }, clampToUnit(.{ .x = 1, .y = 0 }));
+    try std.testing.expectEqual(Vec2{ .x = 0.000_001, .y = 0 }, clampToUnit(.{ .x = 0.000_001, .y = 0 }));
+}
+
+test "clampToUnit propagates NaN inputs" {
+    const result = clampToUnit(.{ .x = std.math.nan(f32), .y = 0 });
+    try std.testing.expect(std.math.isNan(result.x));
+}
+
+test "fireBullet advances PRNG even when pool is full" {
+    const seed: u64 = 456;
+    var prng = std.Random.DefaultPrng.init(seed);
+    var world = try World.init(std.testing.allocator, .{ .bullet_cap = 1 }, &prng);
+    defer world.deinit(std.testing.allocator);
+
+    world.simTick(.{ .thrust = Vec2.zero, .fire = true }, sim_dt);
+    world.simTick(.{ .thrust = Vec2.zero, .fire = true }, sim_dt);
+    try std.testing.expectEqual(@as(u32, 1), world.bullets.len());
+
+    var expected = std.Random.DefaultPrng.init(seed);
+    var random = expected.random();
+    _ = random.float(f32);
+    _ = random.float(f32);
+    try std.testing.expectEqualSlices(u64, &expected.s, &prng.s);
 }

@@ -100,11 +100,13 @@ pub fn Pool(comptime T: type) type {
             return h.index;
         }
 
+        /// Marks a slot for end-of-tick reclaim; doomed handles still resolve until sweep.
         pub fn kill(self: *Self, h: Handle) void {
             const index = self.resolve(h) orelse return;
             self.doomed[index] = true;
         }
 
+        /// Reclaims doomed slots, bumps generations, and returns indices to the free list.
         pub fn sweep(self: *Self) void {
             var index: u32 = 0;
             while (index < self.capacity()) : (index += 1) {
@@ -136,6 +138,7 @@ pub fn Pool(comptime T: type) type {
             self.live_len = 0;
         }
 
+        /// Iterates currently active slots, skipping slots already marked doomed.
         pub fn iter(self: *const Self) Iter {
             return .{ .pool = self };
         }
