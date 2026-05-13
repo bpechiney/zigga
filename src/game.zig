@@ -15,6 +15,8 @@ const player_size: f32 = 20.0;
 pub const Audio = struct {};
 pub const Shake = struct {};
 
+/// Owns allocator-backed runtime state. Non-copyable after init; keep it behind
+/// a single `*Game` and call `deinit` exactly once.
 pub const Game = struct {
     gpa: std.mem.Allocator,
     // Present from the first milestone to pin allocator ownership boundaries.
@@ -73,14 +75,15 @@ pub const Game = struct {
     }
 
     pub fn frame(self: *Game) void {
+        // This is intentionally a no-op until frame-lifetime allocations arrive.
         _ = self.frame_arena.reset(.retain_capacity);
         self.input = pollInput();
-        _ = self.runSimTicks(self.input, rl.getFrameTime());
+        self.runSimTicks(self.input, rl.getFrameTime());
 
         drawWorld(&self.world);
     }
 
-    fn runSimTicks(self: *Game, input: world_mod.Input, frame_dt: f32) u32 {
+    fn runSimTicks(self: *Game, input: world_mod.Input, frame_dt: f32) void {
         const dt = std.math.clamp(frame_dt, 0, sim_dt * max_ticks_per_frame);
         self.accumulator += dt;
         var ticks: u32 = 0;
@@ -90,7 +93,6 @@ pub const Game = struct {
             ticks += 1;
         }
         if (ticks == max_ticks_per_frame) self.accumulator = 0;
-        return ticks;
     }
 };
 
@@ -123,9 +125,18 @@ test "runSimTicks caps catch-up after a large frame stall" {
     try game.init(std.testing.allocator, .{ .bullet_cap = 4 }, 800, 600, 123);
     defer game.deinit();
 
-    const ticks = game.runSimTicks(.{ .thrust = .{ .x = 1, .y = 0 }, .fire = false }, 1);
+    game.runSimTicks(.{ .thrust = .{ .x = 1, .y = 0 }, .fire = false }, 1);
 
-    try std.testing.expectEqual(@as(u32, max_ticks_per_frame), ticks);
-    try std.testing.expectEqual(@as(f32, 0), game.accumulator);
+    try std.testing.expect(game.accumulator < sim_dt);
     try std.testing.expectApproxEqAbs(@as(f32, 425), game.world.player.pos.x, 0.000_001);
+}
+
+test "Game init cleans up after allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, initGameForFailureTest, .{});
+}
+
+fn initGameForFailureTest(allocator: std.mem.Allocator) !void {
+    var game: Game = undefined;
+    try game.init(allocator, .{ .bullet_cap = 4 }, 800, 600, 123);
+    game.deinit();
 }

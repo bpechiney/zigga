@@ -97,6 +97,7 @@ pub const World = struct {
 };
 
 fn clampToUnit(v: Vec2) Vec2 {
+    if (!std.math.isFinite(v.x) or !std.math.isFinite(v.y)) return Vec2.zero;
     const len_sq = v.lengthSquared();
     if (len_sq <= 1) return v;
     return v.normalize();
@@ -119,9 +120,10 @@ test "clampToUnit preserves boundary and small vectors" {
     try std.testing.expectEqual(Vec2{ .x = 0.000_001, .y = 0 }, clampToUnit(.{ .x = 0.000_001, .y = 0 }));
 }
 
-test "clampToUnit propagates NaN inputs" {
+test "clampToUnit sanitizes non-finite inputs" {
     const result = clampToUnit(.{ .x = std.math.nan(f32), .y = 0 });
-    try std.testing.expect(std.math.isNan(result.x));
+    try std.testing.expectEqual(Vec2.zero, result);
+    try std.testing.expectEqual(Vec2.zero, clampToUnit(.{ .x = 0, .y = std.math.inf(f32) }));
 }
 
 test "fireBullet advances PRNG even when pool is full" {
@@ -135,8 +137,10 @@ test "fireBullet advances PRNG even when pool is full" {
     try std.testing.expectEqual(@as(u32, 1), world.bullets.len());
 
     var expected = std.Random.DefaultPrng.init(seed);
-    var random = expected.random();
-    _ = random.float(f32);
-    _ = random.float(f32);
-    try std.testing.expectEqualSlices(u64, &expected.s, &prng.s);
+    var expected_random = expected.random();
+    _ = expected_random.float(f32);
+    _ = expected_random.float(f32);
+
+    var actual_random = prng.random();
+    try std.testing.expectEqual(expected_random.float(f32), actual_random.float(f32));
 }

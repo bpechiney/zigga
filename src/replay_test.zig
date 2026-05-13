@@ -9,6 +9,7 @@ const Vec2 = math.Vec2;
 
 test "replay determinism" {
     const seed: u64 = 0xA11CE;
+    // Fires faster than bullet lifetime at this cap, so spawn-null replay stays covered.
     const caps: world_mod.WorldCaps = .{ .bullet_cap = 16 };
 
     var prng_a = std.Random.DefaultPrng.init(seed);
