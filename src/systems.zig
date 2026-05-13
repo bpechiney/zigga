@@ -12,9 +12,9 @@ const Shake = shake_mod.Shake;
 const Vec2 = math.Vec2;
 const World = world_mod.World;
 
-const enemy_radius: f32 = 14;
-const bullet_radius: f32 = 4;
-const player_radius: f32 = 16;
+const enemy_radius: f32 = 22;
+const bullet_radius: f32 = 6;
+const player_radius: f32 = 22;
 const formation_sway_amplitude: f32 = 12;
 const formation_phase_speed: f32 = 1.6;
 const formation_dive_threshold: f32 = 6.0;
@@ -189,7 +189,7 @@ fn spawnBurst(
             .color_g = color.g,
             .color_b = color.b,
             .color_a = color.a,
-            .size = 2.5,
+            .size = 4.5,
         }) == null) return;
     }
 }

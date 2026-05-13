@@ -21,7 +21,9 @@ pub const Playing = state_mod.Playing;
 pub const GameOver = state_mod.GameOver;
 
 const max_ticks_per_frame: u32 = 5;
-const player_size: f32 = 16.0;
+const player_size: f32 = 28.0;
+const bullet_draw_radius: f32 = 6.0;
+const enemy_draw_radius: f32 = 22.0;
 const fire_cooldown_ticks_default: u8 = 8;
 
 /// Owns allocator-backed runtime state. Non-copyable after init; keep it behind
@@ -330,7 +332,7 @@ fn drawBullets(world: *const world_mod.World) void {
     var iter = world.bullets.iter();
     while (iter.next()) |index| {
         const b = world.bullets.rows.get(index);
-        rl.drawCircleV(.{ .x = b.pos.x, .y = b.pos.y }, 3, rl.Color.yellow);
+        rl.drawCircleV(.{ .x = b.pos.x, .y = b.pos.y }, bullet_draw_radius, rl.Color.yellow);
     }
 }
 
@@ -338,7 +340,7 @@ fn drawEnemyBullets(world: *const world_mod.World) void {
     var iter = world.enemy_bullets.iter();
     while (iter.next()) |index| {
         const b = world.enemy_bullets.rows.get(index);
-        rl.drawCircleV(.{ .x = b.pos.x, .y = b.pos.y }, 3, rl.Color.red);
+        rl.drawCircleV(.{ .x = b.pos.x, .y = b.pos.y }, bullet_draw_radius, rl.Color.red);
     }
 }
 
@@ -351,7 +353,7 @@ fn drawEnemies(world: *const world_mod.World) void {
             .zako => rl.Color.lime,
             .goei => rl.Color.purple,
         };
-        rl.drawPoly(.{ .x = e.pos.x, .y = e.pos.y }, 6, 12, 0, color);
+        rl.drawPoly(.{ .x = e.pos.x, .y = e.pos.y }, 6, enemy_draw_radius, 0, color);
     }
 }
 
