@@ -8,6 +8,9 @@ const Pool = @import("pool.zig").Pool;
 const Vec2 = math.Vec2;
 
 pub const sim_dt: f32 = 1.0 / 60.0;
+/// Default dive cadence: roughly one dive per 3.3 s of formation hover, matching
+/// the pre-milestone-3 hard-coded value. `levels.spawn` overrides it per level.
+const default_dive_chance_per_tick: f32 = 0.005;
 const player_speed: f32 = 300;
 const bullet_speed: f32 = 500;
 const bullet_lifetime: f32 = 2;
@@ -112,6 +115,10 @@ pub const World = struct {
     /// Game.frame drains this into `Playing.score`. Lives on World because it's
     /// sim-pure data — no external system pointers, no replay implications.
     kills_by_kind: std.EnumArray(EnemyKind, u32),
+    /// Probability per sim tick that a formation enemy starts a dive. Configured
+    /// by `levels.spawn` from `LevelDef.dive_interval` (mean seconds between
+    /// dives); kept on World because the sim reads it every tick.
+    dive_chance_per_tick: f32,
 
     pub fn init(
         gpa: std.mem.Allocator,
@@ -137,6 +144,7 @@ pub const World = struct {
             .bounds = bounds,
             .sim_prng = sim_prng,
             .kills_by_kind = std.EnumArray(EnemyKind, u32).initFill(0),
+            .dive_chance_per_tick = default_dive_chance_per_tick,
         };
     }
 

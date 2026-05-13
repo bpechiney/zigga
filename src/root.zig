@@ -11,5 +11,18 @@ pub const systems = @import("systems.zig");
 pub const world = @import("world.zig");
 
 test {
+    // Force-reference every module so its `test {}` blocks are discovered. Top
+    // level `pub const X = @import(...)` is lazy in test mode; without these
+    // explicit refs, tests in files that aren't pulled in transitively (e.g.
+    // game.zig, levels.zig, state.zig) silently never run.
+    _ = @import("audio.zig");
+    _ = @import("game.zig");
+    _ = @import("levels.zig");
+    _ = @import("math.zig");
+    _ = @import("pool.zig");
     _ = @import("replay_test.zig");
+    _ = @import("shake.zig");
+    _ = @import("state.zig");
+    _ = @import("systems.zig");
+    _ = @import("world.zig");
 }

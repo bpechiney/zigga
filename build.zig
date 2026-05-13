@@ -103,6 +103,16 @@ pub fn build(b: *std.Build) !void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
 
+    // Install the assets/ tree alongside the binary so runtime ZON / wav / ogg
+    // lookups via `<app_dir>../assets/...` resolve from `zig-out/assets/` (or
+    // any other install prefix). Without this step the installed binary fails
+    // to load levels outside the source tree's cwd.
+    b.installDirectory(.{
+        .source_dir = b.path("assets"),
+        .install_dir = .prefix,
+        .install_subdir = "assets",
+    });
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.

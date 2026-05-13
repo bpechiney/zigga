@@ -1,6 +1,7 @@
 //! Frame-batched SFX event queue plus music streaming + crossfade.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const rl = @import("raylib");
 
 pub const Tag = enum {
@@ -63,6 +64,13 @@ pub const Audio = struct {
     base_volume: std.EnumArray(Tag, f32),
     music: MusicState,
     playback_enabled: bool,
+    /// Runtime-overridable prefixes; `Audio.init` seeds them with the cwd-relative
+    /// defaults, and `Game.init` calls `setAssetRoots` once an exe-relative path
+    /// resolves. Stored inline so Audio doesn't borrow into Game's lifetime.
+    sfx_prefix_buf: [128]u8 = undefined,
+    sfx_prefix_len: usize,
+    music_prefix_buf: [128]u8 = undefined,
+    music_prefix_len: usize,
 
     pub fn init(self: *Audio) void {
         self.pending = std.ArrayList(Event).initBuffer(&self.pending_buf);
@@ -73,7 +81,26 @@ pub const Audio = struct {
         self.base_volume = std.EnumArray(Tag, f32).initFill(default_base_volume);
         self.music = .{};
         self.playback_enabled = false;
-        self.resolveSfxSources(default_sfx_prefix);
+        copyPrefix(&self.sfx_prefix_buf, &self.sfx_prefix_len, default_sfx_prefix);
+        copyPrefix(&self.music_prefix_buf, &self.music_prefix_len, default_music_prefix);
+        self.resolveSfxSources(self.sfxPrefix());
+    }
+
+    /// Override the asset roots at runtime (e.g. once `Game` has resolved an
+    /// exe-relative path) and re-resolve SFX fallback flags against the new
+    /// path. Trailing slash required on both prefixes.
+    pub fn setAssetRoots(self: *Audio, sfx_prefix: []const u8, music_prefix: []const u8) void {
+        copyPrefix(&self.sfx_prefix_buf, &self.sfx_prefix_len, sfx_prefix);
+        copyPrefix(&self.music_prefix_buf, &self.music_prefix_len, music_prefix);
+        self.resolveSfxSources(self.sfxPrefix());
+    }
+
+    fn sfxPrefix(self: *const Audio) []const u8 {
+        return self.sfx_prefix_buf[0..self.sfx_prefix_len];
+    }
+
+    fn musicPrefix(self: *const Audio) []const u8 {
+        return self.music_prefix_buf[0..self.music_prefix_len];
     }
 
     pub fn deinit(self: *Audio) void {
@@ -92,10 +119,20 @@ pub const Audio = struct {
     /// Pure file-existence check — does not touch raylib's audio device, so it
     /// is safe to run in unit tests with no audio context.
     pub fn resolveSfxSources(self: *Audio, prefix: []const u8) void {
+        var missing_count: u32 = 0;
         inline for (@typeInfo(Tag).@"enum".fields) |field| {
             const tag = @field(Tag, field.name);
-            self.use_fallback.set(tag, !sfxFileExists(prefix, field.name));
+            const found = sfxFileExists(prefix, field.name);
+            self.use_fallback.set(tag, !found);
+            if (!found) missing_count += 1;
         }
+        // One summary line per resolve, suppressed in test mode — the
+        // orchestrated test runner's `--listen=-` pipe deadlocks under
+        // accumulated stderr from many tests.
+        if (missing_count > 0 and !builtin.is_test) std.log.warn(
+            "audio: {d} sfx file(s) missing under {s}, using placeholder sines",
+            .{ missing_count, prefix },
+        );
     }
 
     /// Lights up real raylib playback. Caller must have initialized the audio
@@ -104,9 +141,10 @@ pub const Audio = struct {
     pub fn enablePlayback(self: *Audio) void {
         self.playback_enabled = true;
         const sample_rate: u32 = 22_050;
+        const prefix = self.sfxPrefix();
         inline for (@typeInfo(Tag).@"enum".fields) |field| {
             const tag = @field(Tag, field.name);
-            self.sounds.set(tag, loadSfx(tag, self.use_fallback.get(tag), sample_rate));
+            self.sounds.set(tag, loadSfx(tag, self.use_fallback.get(tag), prefix, sample_rate));
             self.sound_loaded.set(tag, true);
         }
     }
@@ -130,7 +168,7 @@ pub const Audio = struct {
         if (self.music.fade_mode == .none and self.music.current_track == track) return;
         if (self.music.fade_mode != .none) self.finalizeCrossfade();
 
-        const incoming: ?rl.Music = if (self.playback_enabled) loadMusicTrack(track) else null;
+        const incoming: ?rl.Music = if (self.playback_enabled) loadMusicTrack(self.musicPrefix(), track) else null;
         if (incoming) |m| {
             rl.playMusicStream(m);
             rl.setMusicVolume(m, 0);
@@ -303,25 +341,29 @@ fn placeholderFreq(tag: Tag) f32 {
 }
 
 fn sfxFileExists(prefix: []const u8, name: []const u8) bool {
-    var path_buf: [128]u8 = undefined;
+    var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrintZ(&path_buf, "{s}{s}.wav", .{ prefix, name }) catch return false;
-    if (rl.fileExists(path)) return true;
-    std.log.warn("audio: missing {s}, using placeholder sine", .{path});
-    return false;
+    return rl.fileExists(path);
 }
 
-fn loadSfx(tag: Tag, use_fallback: bool, sample_rate: u32) rl.Sound {
+fn loadSfx(tag: Tag, use_fallback: bool, prefix: []const u8, sample_rate: u32) rl.Sound {
     if (use_fallback) return loadPlaceholder(tag, sample_rate);
-    var path_buf: [128]u8 = undefined;
+    var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrintZ(
         &path_buf,
         "{s}{s}.wav",
-        .{ default_sfx_prefix, @tagName(tag) },
+        .{ prefix, @tagName(tag) },
     ) catch return loadPlaceholder(tag, sample_rate);
     return rl.loadSound(path) catch {
         std.log.warn("audio: load failed for {s}, falling back", .{path});
         return loadPlaceholder(tag, sample_rate);
     };
+}
+
+fn copyPrefix(buf: []u8, len: *usize, value: []const u8) void {
+    const n = @min(value.len, buf.len);
+    @memcpy(buf[0..n], value[0..n]);
+    len.* = n;
 }
 
 fn loadPlaceholder(tag: Tag, sample_rate: u32) rl.Sound {
@@ -332,18 +374,18 @@ fn loadPlaceholder(tag: Tag, sample_rate: u32) rl.Sound {
     return rl.loadSoundFromWave(wave);
 }
 
-fn loadMusicTrack(track: MusicTrack) ?rl.Music {
+fn loadMusicTrack(prefix: []const u8, track: MusicTrack) ?rl.Music {
     const name = switch (track) {
         .none => return null,
         .level_1 => "level_1",
         .level_2 => "level_2",
         .level_3 => "level_3",
     };
-    var path_buf: [128]u8 = undefined;
+    var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrintZ(
         &path_buf,
         "{s}{s}.ogg",
-        .{ default_music_prefix, name },
+        .{ prefix, name },
     ) catch return null;
     if (!rl.fileExists(path)) {
         std.log.warn("audio: missing {s}, music silent for this track", .{path});

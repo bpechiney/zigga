@@ -1,5 +1,7 @@
 //! Top-level state machine: attract / playing / paused / game_over.
 
+const world_mod = @import("world.zig");
+
 pub const starting_lives: u8 = 3;
 pub const death_pause_s: f32 = 1.5;
 pub const game_over_s: f32 = 5.0;
@@ -36,7 +38,7 @@ pub fn fresh() Playing {
 }
 
 /// Score reward per kind. Tunable — keep in sync with HUD expectations.
-pub fn killScore(kind: anytype) u32 {
+pub fn killScore(kind: world_mod.EnemyKind) u32 {
     return switch (kind) {
         .grunt => 50,
         .zako => 80,

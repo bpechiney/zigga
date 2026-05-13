@@ -18,7 +18,6 @@ const player_radius: f32 = 22;
 const formation_sway_amplitude: f32 = 12;
 const formation_phase_speed: f32 = 1.6;
 const formation_dive_threshold: f32 = 6.0;
-const dive_chance_per_tick: f32 = 0.005;
 const dive_fire_chance_per_tick: f32 = 0.012;
 const dive_speed: f32 = 280;
 const return_speed: f32 = 200;
@@ -68,7 +67,7 @@ pub fn updateEnemies(world: *World, audio: *Audio, dt: f32) void {
                 f.phase += formation_phase_speed * dt;
                 const sway = @sin(f.phase) * formation_sway_amplitude;
                 enemy.pos = .{ .x = f.home.x + sway, .y = f.home.y };
-                if (f.phase > formation_dive_threshold and random.float(f32) < dive_chance_per_tick) {
+                if (f.phase > formation_dive_threshold and random.float(f32) < world.dive_chance_per_tick) {
                     const target = sampleDiveTarget(world.player.pos, random);
                     enemy.state = .{ .diving = .{ .home = f.home, .target = target, .t = 0 } };
                     audio.emit(.enemy_dive, 0);

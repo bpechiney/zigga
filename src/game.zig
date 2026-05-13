@@ -26,6 +26,8 @@ const bullet_draw_radius: f32 = 6.0;
 const enemy_draw_radius: f32 = 22.0;
 const fire_cooldown_ticks_default: u8 = 8;
 
+const default_asset_root: []const u8 = "assets/";
+
 /// Owns allocator-backed runtime state. Non-copyable after init; keep it behind
 /// a single `*Game` and call `deinit` exactly once.
 pub const Game = struct {
@@ -43,6 +45,11 @@ pub const Game = struct {
     fire_cooldown: u8,
     window_w: i32,
     window_h: i32,
+    /// Asset prefix resolved at init: prefers `<getApplicationDirectory()>../assets/`
+    /// (installed layout from `b.installDirectory` → `zig-out/assets/`), falls back
+    /// to cwd-relative `assets/` for tests or untweaked source-tree runs.
+    asset_root_buf: [512]u8,
+    asset_root_len: usize,
 
     pub fn init(
         self: *Game,
@@ -83,6 +90,53 @@ pub const Game = struct {
         self.fire_cooldown = 0;
         self.window_w = window_w;
         self.window_h = window_h;
+        self.resolveAssetRoot();
+
+        var sfx_buf: [512]u8 = undefined;
+        var music_buf: [512]u8 = undefined;
+        const root = self.assetRoot();
+        const sfx_prefix = std.fmt.bufPrint(&sfx_buf, "{s}sfx/", .{root}) catch root;
+        const music_prefix = std.fmt.bufPrint(&music_buf, "{s}music/", .{root}) catch root;
+        self.audio.setAssetRoots(sfx_prefix, music_prefix);
+    }
+
+    fn resolveAssetRoot(self: *Game) void {
+        // Probe `<app_dir>../assets/levels/01.zon`; if present, we're running an
+        // installed binary and assets live under the install prefix. Otherwise
+        // fall back to cwd-relative `assets/` (dev source tree, tests).
+        const app_dir = rl.getApplicationDirectory();
+        var probe_buf: [512]u8 = undefined;
+        const probe = std.fmt.bufPrintZ(
+            &probe_buf,
+            "{s}../assets/levels/01.zon",
+            .{app_dir},
+        ) catch {
+            self.copyAssetRoot(default_asset_root);
+            return;
+        };
+        if (rl.fileExists(probe)) {
+            const resolved = std.fmt.bufPrint(
+                &self.asset_root_buf,
+                "{s}../assets/",
+                .{app_dir},
+            ) catch {
+                self.copyAssetRoot(default_asset_root);
+                return;
+            };
+            self.asset_root_len = resolved.len;
+            return;
+        }
+        self.copyAssetRoot(default_asset_root);
+    }
+
+    fn copyAssetRoot(self: *Game, value: []const u8) void {
+        const n = @min(value.len, self.asset_root_buf.len);
+        @memcpy(self.asset_root_buf[0..n], value[0..n]);
+        self.asset_root_len = n;
+    }
+
+    fn assetRoot(self: *const Game) []const u8 {
+        return self.asset_root_buf[0..self.asset_root_len];
     }
 
     pub fn deinit(self: *Game) void {
@@ -262,7 +316,7 @@ pub const Game = struct {
         _ = self.audio.flush();
         self.audio.clearPending();
 
-        const def = try levels_mod.loadLevelDef(self.perm_arena.allocator(), level_index);
+        const def = try levels_mod.loadLevelDef(self.perm_arena.allocator(), self.assetRoot(), level_index);
 
         self.world.player = world_mod.Player.init(self.world.bounds);
         levels_mod.spawn(&self.world, def);
@@ -551,8 +605,11 @@ test "state transition table: attract+key, pause toggle, death paths, game_over 
     game.state = .{ .paused = before_pause };
     try std.testing.expect(std.meta.activeTag(game.state) == .paused);
 
-    // paused → playing (resume preserves snapshot)
-    game.state = .{ .playing = game.state.paused };
+    // paused → playing (resume preserves snapshot). The carryover must be
+    // copied out before reassigning self.state — Zig sets the new tag before
+    // evaluating the RHS, so reading `game.state.paused` inline panics.
+    const carried = game.state.paused;
+    game.state = .{ .playing = carried };
     try std.testing.expect(std.meta.activeTag(game.state) == .playing);
     try std.testing.expectEqual(before_pause.score, game.state.playing.score);
     try std.testing.expectEqual(before_pause.lives, game.state.playing.lives);
