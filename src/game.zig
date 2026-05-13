@@ -180,14 +180,20 @@ pub const Game = struct {
     }
 
     fn drawCurrent(self: *Game) void {
-        // Render dims come from raylib so HIGHDPI Retina framebuffers scale up
-        // correctly. The Camera2D zoom (render_h / bounds.h) maps world points
-        // to the actual pixel grid; HUD / overlays are drawn outside the camera
-        // at pixel coordinates from getRenderWidth/Height.
-        const rw = rl.getRenderWidth();
-        const rh = rl.getRenderHeight();
-        const zoom = @as(f32, @floatFromInt(rh)) / self.world.bounds.height;
+        // World, HUD, and overlay coords are all GLFW screen coordinates
+        // (points). With HIGHDPI on macOS Retina, raylib's draw pipeline handles
+        // the upscale to the framebuffer internally — measureText and drawText
+        // both speak points, so centering math uses window_w/window_h (points),
+        // not getRenderWidth/Height (pixels). Don't reintroduce a Camera2D zoom
+        // here: world entities are authored in points already, so a zoom would
+        // push them past the visible canvas. Shake offset is points too.
         const off = self.shake.offset();
+        const camera: rl.Camera2D = .{
+            .offset = .{ .x = off.x, .y = off.y },
+            .target = .{ .x = 0, .y = 0 },
+            .rotation = 0,
+            .zoom = 1,
+        };
 
         rl.beginDrawing();
         defer rl.endDrawing();
@@ -195,18 +201,12 @@ pub const Game = struct {
 
         switch (self.state) {
             .attract => {
-                drawAttract(rw, rh);
+                drawAttract(self.window_w, self.window_h);
                 return;
             },
             else => {},
         }
 
-        const camera: rl.Camera2D = .{
-            .offset = .{ .x = off.x, .y = off.y },
-            .target = .{ .x = 0, .y = 0 },
-            .rotation = 0,
-            .zoom = zoom,
-        };
         {
             camera.begin();
             defer camera.end();
@@ -218,12 +218,12 @@ pub const Game = struct {
         }
 
         switch (self.state) {
-            .playing => |p| drawHud(rw, p),
+            .playing => |p| drawHud(self.window_w, p),
             .paused => |p| {
-                drawHud(rw, p);
-                drawPausedOverlay(rw, rh);
+                drawHud(self.window_w, p);
+                drawPausedOverlay(self.window_w, self.window_h);
             },
-            .game_over => |g| drawGameOverOverlay(rw, rh, g),
+            .game_over => |g| drawGameOverOverlay(self.window_w, self.window_h, g),
             .attract => unreachable,
         }
     }

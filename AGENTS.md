@@ -56,10 +56,10 @@ Per frame: `pollInput → accumulator += clamp(getFrameTime, 5·sim_dt) → N×s
 The helper carries several workarounds — read the comments before changing it:
 
 - `FLAG_WINDOW_HIGHDPI` must be passed to `setConfigFlags` **before** `initWindow`; setting it after has no effect.
-- **Don't drop the HIGHDPI flag.** Without it, the 1×1 probe-then-resize dance on macOS Retina leaves raylib with a framebuffer that doesn't match the window — the screen renders all-black. Keep HIGHDPI on; if world points and framebuffer pixels diverge, bridge them with a Camera2D zoom (`zoom = getRenderHeight() / bounds.height`) in `drawCurrent`, not by toggling the flag.
+- **Don't drop the HIGHDPI flag.** Without it, the 1×1 probe-then-resize dance on macOS Retina leaves raylib with a framebuffer that doesn't match the window — the screen renders all-black. Keep HIGHDPI on.
 - The helper opens a hidden 1×1 probe window first, then resizes — `setWindowSize` and `getMonitorWidth/Height` both speak GLFW *screen coordinates* (points on macOS), not pixels. Don't divide by `getWindowScaleDPI` — it reports `(1, 1)` on some macOS configurations and is unreliable.
 - `macos_chrome_height` (52 pt) is subtracted from the monitor height to leave room for the menu bar (~24 pt) and title bar (~28 pt); without it the window's bottom edge clips off-screen.
-- HUD / overlays draw in pixel space (`getRenderWidth/Height`); world entities draw inside the camera zoom in point space (`bounds.width/height`). Don't mix.
+- **All drawing is in points, end-to-end.** With HIGHDPI on, raylib's draw API (`drawText`, `drawTriangle`, `drawCircleV`, `measureText`, …) operates in GLFW screen coordinates; raylib handles the Retina upscale to the framebuffer internally. Center / right-align math feeds `window_w`/`window_h` (points), **not** `getRenderWidth/Height` (pixels) — mixing units pushes text and entities off the visible canvas. The world's `bounds` are in points for the same reason; no Camera2D zoom is needed.
 
 ## Gotchas
 
