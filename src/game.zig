@@ -211,6 +211,7 @@ pub const Game = struct {
         }
         const maybe = try rep.nextTick();
         if (maybe) |input| {
+            self.prev_player_pos = self.world.player.pos;
             systems.simTick(&self.world, &self.audio, &self.shake, input, sim_dt);
         } else {
             self.should_exit = true;
@@ -253,7 +254,15 @@ pub const Game = struct {
 
             if (self.world.player.dead) {
                 p.death_pause = state_mod.death_pause_s;
+                // Finalize on first death: a trace crossing a death/respawn
+                // boundary can't be replayed correctly (world state resets but
+                // the replay path calls simTick directly). Covering one life is
+                // safe and sufficient.
+                self.finalizeRecording();
             } else if (self.world.enemies.len() == 0) {
+                // Finalize before level clear for the same reason: loadLevel
+                // resets world state the replay path can't reconstruct.
+                self.finalizeRecording();
                 const next_index: u8 = (p.level_index + 1) % levels_mod.level_count;
                 p.level_index = next_index;
                 p.level_timer = 0;
@@ -359,17 +368,7 @@ pub const Game = struct {
         if (p.lives > 0) p.lives -= 1;
         if (p.lives == 0) {
             self.state = .{ .game_over = .{ .final_score = p.score, .timer_s = state_mod.game_over_s } };
-            // Spec: record only the first playing session. Finalize once on
-            // the first game_over and skip subsequent attract→playing cycles.
-            switch (self.mode) {
-                .record => |*rm| if (!rm.finished) {
-                    rm.recorder.finalize() catch |err| {
-                        std.log.warn("record: finalize failed: {s}", .{@errorName(err)});
-                    };
-                    rm.finished = true;
-                },
-                else => {},
-            }
+            self.finalizeRecording();
             return true;
         }
         // Respawn: revive player + scrub stale projectiles/particles. Enemies stay.
@@ -379,6 +378,18 @@ pub const Game = struct {
         self.world.enemy_bullets.clearActive();
         self.world.particles.clearActive();
         return false;
+    }
+
+    fn finalizeRecording(self: *Game) void {
+        switch (self.mode) {
+            .record => |*rm| if (!rm.finished) {
+                rm.recorder.finalize() catch |err| {
+                    std.log.warn("record: finalize failed: {s}", .{@errorName(err)});
+                };
+                rm.finished = true;
+            },
+            else => {},
+        }
     }
 
     /// Hard reset for a level boundary. Step order matters:
@@ -419,7 +430,11 @@ pub const Game = struct {
             switch (self.mode) {
                 .record => |*rm| if (!rm.finished and self.state == .playing) {
                     rm.recorder.writeTick(gated) catch |err| {
-                        std.log.warn("record: writeTick failed: {s}", .{@errorName(err)});
+                        // Stop recording rather than silently continuing past a
+                        // failed write — a partial trace is worse than none.
+                        std.log.warn("record: writeTick failed ({s}), stopping", .{@errorName(err)});
+                        rm.recorder.finalize() catch {};
+                        rm.finished = true;
                     };
                 },
                 else => {},
