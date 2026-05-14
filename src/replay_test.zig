@@ -86,7 +86,26 @@ const Harness = struct {
 };
 
 fn seedFormation(world: *world_mod.World) void {
-    world.spawnFormation(.{ .x = 150, .y = 120 }, 4, 3, .{ .x = 80, .y = 60 });
+    const top_left: Vec2 = .{ .x = 150, .y = 120 };
+    const spacing: Vec2 = .{ .x = 80, .y = 60 };
+    var slots: [12]world_mod.FormationSlot = undefined;
+    var i: u32 = 0;
+    var row: u32 = 0;
+    while (row < 3) : (row += 1) {
+        var col: u32 = 0;
+        while (col < 4) : (col += 1) {
+            slots[i] = .{
+                .home = .{
+                    .x = top_left.x + @as(f32, @floatFromInt(col)) * spacing.x,
+                    .y = top_left.y + @as(f32, @floatFromInt(row)) * spacing.y,
+                },
+                .kind_index = @intCast(row % 3),
+            };
+            i += 1;
+        }
+    }
+    const kinds = [_]world_mod.EnemyKind{ .goei, .zako, .grunt };
+    world.spawnFormation(&slots, &kinds);
 }
 
 fn inputAt(tick: u32) world_mod.Input {

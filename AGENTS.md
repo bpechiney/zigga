@@ -56,8 +56,10 @@ Per frame: `pollInput → accumulator += clamp(getFrameTime, 5·sim_dt) → N×s
 The helper carries several workarounds — read the comments before changing it:
 
 - `FLAG_WINDOW_HIGHDPI` must be passed to `setConfigFlags` **before** `initWindow`; setting it after has no effect.
+- **Don't drop the HIGHDPI flag.** Without it, the 1×1 probe-then-resize dance on macOS Retina leaves raylib with a framebuffer that doesn't match the window — the screen renders all-black. Keep HIGHDPI on.
 - The helper opens a hidden 1×1 probe window first, then resizes — `setWindowSize` and `getMonitorWidth/Height` both speak GLFW *screen coordinates* (points on macOS), not pixels. Don't divide by `getWindowScaleDPI` — it reports `(1, 1)` on some macOS configurations and is unreliable.
 - `macos_chrome_height` (52 pt) is subtracted from the monitor height to leave room for the menu bar (~24 pt) and title bar (~28 pt); without it the window's bottom edge clips off-screen.
+- **Mixed coord systems with HIGHDPI on macOS.** `drawText` / `measureText` operate in GLFW screen coordinates (POINTS) — `window_w`/`window_h` from `getMonitorWidth/Height`. Shapes (`drawTriangle`, `drawCircleV`, `drawRectangle`) operate in framebuffer PIXELS — `getRenderWidth/Height`. The world is authored in points, so `drawCurrent` wraps shape drawing in a `Camera2D` with `zoom = getRenderHeight() / bounds.height` so world point coords scale up to fill the pixel framebuffer; otherwise everything clusters in the upper-left quadrant. Text overlays stay outside the camera with point-space centering. Full-screen dim rectangles (paused / game_over) use `getRenderWidth/Height` because shapes outside the camera are still in pixels. Don't try to "unify" these by removing the camera zoom — gameplay breaks because the player can move past `bounds.height` (≈ middle of the visible window) and the bullet culler kills shots.
 
 ## Gotchas
 

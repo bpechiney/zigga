@@ -12,13 +12,12 @@ const Shake = shake_mod.Shake;
 const Vec2 = math.Vec2;
 const World = world_mod.World;
 
-const enemy_radius: f32 = 14;
-const bullet_radius: f32 = 4;
-const player_radius: f32 = 16;
+const enemy_radius: f32 = 22;
+const bullet_radius: f32 = 6;
+const player_radius: f32 = 22;
 const formation_sway_amplitude: f32 = 12;
 const formation_phase_speed: f32 = 1.6;
 const formation_dive_threshold: f32 = 6.0;
-const dive_chance_per_tick: f32 = 0.005;
 const dive_fire_chance_per_tick: f32 = 0.012;
 const dive_speed: f32 = 280;
 const return_speed: f32 = 200;
@@ -68,7 +67,7 @@ pub fn updateEnemies(world: *World, audio: *Audio, dt: f32) void {
                 f.phase += formation_phase_speed * dt;
                 const sway = @sin(f.phase) * formation_sway_amplitude;
                 enemy.pos = .{ .x = f.home.x + sway, .y = f.home.y };
-                if (f.phase > formation_dive_threshold and random.float(f32) < dive_chance_per_tick) {
+                if (f.phase > formation_dive_threshold and random.float(f32) < world.dive_chance_per_tick) {
                     const target = sampleDiveTarget(world.player.pos, random);
                     enemy.state = .{ .diving = .{ .home = f.home, .target = target, .t = 0 } };
                     audio.emit(.enemy_dive, 0);
@@ -142,6 +141,7 @@ pub fn collide(world: *World, audio: *Audio, shake: *Shake) void {
                 audio.emit(.enemy_explode, 0);
                 spawnBurst(world, enemy.pos, 16, 220, random, .{ .r = 255, .g = 120, .b = 60, .a = 255 }, 0.6);
                 shake.kick(0.35);
+                world.kills_by_kind.set(enemy.kind, world.kills_by_kind.get(enemy.kind) + 1);
                 world.enemies.kill(.{ .index = ei, .generation = world.enemies.generations[ei] });
                 break;
             }
@@ -188,7 +188,7 @@ fn spawnBurst(
             .color_g = color.g,
             .color_b = color.b,
             .color_a = color.a,
-            .size = 2.5,
+            .size = 4.5,
         }) == null) return;
     }
 }

@@ -8,6 +8,9 @@ const Pool = @import("pool.zig").Pool;
 const Vec2 = math.Vec2;
 
 pub const sim_dt: f32 = 1.0 / 60.0;
+/// Default dive cadence: roughly one dive per 3.3 s of formation hover, matching
+/// the pre-milestone-3 hard-coded value. `levels.spawn` overrides it per level.
+const default_dive_chance_per_tick: f32 = 0.005;
 const player_speed: f32 = 300;
 const bullet_speed: f32 = 500;
 const bullet_lifetime: f32 = 2;
@@ -41,6 +44,19 @@ pub const Player = struct {
     pos: Vec2,
     vel: Vec2,
     dead: bool = false,
+
+    pub fn init(bounds: Bounds) Player {
+        return .{
+            .pos = .{ .x = bounds.width * 0.5, .y = bounds.height * 0.875 },
+            .vel = Vec2.zero,
+            .dead = false,
+        };
+    }
+};
+
+pub const FormationSlot = struct {
+    home: Vec2,
+    kind_index: u8,
 };
 
 pub const Bullet = struct {
@@ -95,6 +111,14 @@ pub const World = struct {
     particles: ParticlePool,
     bounds: Bounds,
     sim_prng: *std.Random.DefaultPrng,
+    /// Per-tick scratch: bumped each time `collide` kills an enemy of that kind.
+    /// Game.frame drains this into `Playing.score`. Lives on World because it's
+    /// sim-pure data — no external system pointers, no replay implications.
+    kills_by_kind: std.EnumArray(EnemyKind, u32),
+    /// Probability per sim tick that a formation enemy starts a dive. Configured
+    /// by `levels.spawn` from `LevelDef.dive_interval` (mean seconds between
+    /// dives); kept on World because the sim reads it every tick.
+    dive_chance_per_tick: f32,
 
     pub fn init(
         gpa: std.mem.Allocator,
@@ -119,6 +143,8 @@ pub const World = struct {
             .particles = particles,
             .bounds = bounds,
             .sim_prng = sim_prng,
+            .kills_by_kind = std.EnumArray(EnemyKind, u32).initFill(0),
+            .dive_chance_per_tick = default_dive_chance_per_tick,
         };
     }
 
@@ -130,31 +156,32 @@ pub const World = struct {
         self.* = undefined;
     }
 
-    pub fn spawnFormation(self: *World, top_left: Vec2, cols: u32, rows: u32, spacing: Vec2) void {
-        var row: u32 = 0;
-        while (row < rows) : (row += 1) {
-            var col: u32 = 0;
-            while (col < cols) : (col += 1) {
-                const home: Vec2 = .{
-                    .x = top_left.x + @as(f32, @floatFromInt(col)) * spacing.x,
-                    .y = top_left.y + @as(f32, @floatFromInt(row)) * spacing.y,
-                };
-                const kind: EnemyKind = switch (row % 3) {
-                    0 => .goei,
-                    1 => .zako,
-                    else => .grunt,
-                };
-                const phase_offset: f32 = @as(f32, @floatFromInt(col)) * 0.3 +
-                    @as(f32, @floatFromInt(row)) * 0.5;
-                _ = self.enemies.spawn(.{
-                    .pos = home,
-                    .vel = Vec2.zero,
-                    .hp = enemyHp(kind),
-                    .kind = kind,
-                    .state = .{ .formation = .{ .home = home, .phase = phase_offset } },
-                });
-            }
+    pub fn spawnFormation(
+        self: *World,
+        formation: []const FormationSlot,
+        kinds: []const EnemyKind,
+    ) void {
+        for (formation, 0..) |slot, i| {
+            const kind = kinds[slot.kind_index];
+            const phase_offset: f32 = @as(f32, @floatFromInt(i)) * 0.31;
+            _ = self.enemies.spawn(.{
+                .pos = slot.home,
+                .vel = Vec2.zero,
+                .hp = enemyHp(kind),
+                .kind = kind,
+                .state = .{ .formation = .{ .home = slot.home, .phase = phase_offset } },
+            });
         }
+    }
+
+    /// Bumps generations across every pool so any handle held over the call returns
+    /// `null` from `resolve`. Player is untouched — callers reset it explicitly when
+    /// the semantics demand (e.g. `loadLevel`).
+    pub fn clearActive(self: *World) void {
+        self.bullets.clearActive();
+        self.enemy_bullets.clearActive();
+        self.enemies.clearActive();
+        self.particles.clearActive();
     }
 
     pub fn fireBullet(self: *World) void {
