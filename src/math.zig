@@ -34,6 +34,13 @@ pub const Vec2 = struct {
         if (len == 0) return Vec2.zero;
         return v.scale(1 / len);
     }
+
+    pub fn lerp(a: Vec2, b: Vec2, t: f32) Vec2 {
+        return .{
+            .x = a.x + (b.x - a.x) * t,
+            .y = a.y + (b.y - a.y) * t,
+        };
+    }
 };
 
 pub fn clamp(value: f32, min: f32, max: f32) f32 {
@@ -68,6 +75,14 @@ test "Vec2 normalize" {
 
 test "Vec2 normalize zero" {
     try std.testing.expectEqual(Vec2.zero, Vec2.zero.normalize());
+}
+
+test "Vec2 lerp endpoints and midpoint" {
+    const a: Vec2 = .{ .x = 0, .y = 0 };
+    const b: Vec2 = .{ .x = 10, .y = -4 };
+    try std.testing.expectEqual(a, Vec2.lerp(a, b, 0));
+    try std.testing.expectEqual(b, Vec2.lerp(a, b, 1));
+    try std.testing.expectEqual(Vec2{ .x = 5, .y = -2 }, Vec2.lerp(a, b, 0.5));
 }
 
 test "Vec2 consts" {

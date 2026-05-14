@@ -6,6 +6,7 @@ const rl = @import("raylib");
 const audio_mod = @import("audio.zig");
 const levels_mod = @import("levels.zig");
 const math = @import("math.zig");
+const replay = @import("replay.zig");
 const shake_mod = @import("shake.zig");
 const state_mod = @import("state.zig");
 const systems = @import("systems.zig");
@@ -19,6 +20,8 @@ pub const Shake = shake_mod.Shake;
 pub const State = state_mod.State;
 pub const Playing = state_mod.Playing;
 pub const GameOver = state_mod.GameOver;
+pub const Recorder = replay.Recorder;
+pub const Replayer = replay.Replayer;
 
 const max_ticks_per_frame: u32 = 5;
 const player_size: f32 = 28.0;
@@ -27,6 +30,27 @@ const enemy_draw_radius: f32 = 22.0;
 const fire_cooldown_ticks_default: u8 = 8;
 
 const default_asset_root: []const u8 = "assets/";
+
+/// `record` carries an extra `finished` flag because the spec records ONLY the
+/// first playing session; on game_over we finalize and stop writing. Replay
+/// modes borrow a Replayer that main owns.
+pub const Mode = union(enum) {
+    normal,
+    record: RecordMode,
+    replay_watch: *Replayer,
+    replay_speed: *Replayer,
+};
+
+pub const RecordMode = struct {
+    recorder: *Recorder,
+    finished: bool = false,
+};
+
+/// Replay reads the seed from the trace; everything else uses a literal.
+pub const SeedSource = union(enum) {
+    literal: u64,
+    replayer: *Replayer,
+};
 
 /// Owns allocator-backed runtime state. Non-copyable after init; keep it behind
 /// a single `*Game` and call `deinit` exactly once.
@@ -39,6 +63,11 @@ pub const Game = struct {
     world: world_mod.World,
     input: world_mod.Input,
     accumulator: f32,
+    /// `world.player.pos` immediately before the most recent sim tick.
+    /// `drawCurrent` lerps from prev → cur with `alpha = accumulator / sim_dt`
+    /// so the player isn't visually quantized into sim_dt jumps when
+    /// `frame_dt` straddles the boundary. Render-only — replay-irrelevant.
+    prev_player_pos: Vec2,
     audio: Audio,
     shake: Shake,
     state: State,
@@ -54,6 +83,8 @@ pub const Game = struct {
     asset_root: []const u8,
     sfx_prefix: []const u8,
     music_prefix: []const u8,
+    mode: Mode,
+    should_exit: bool,
 
     pub fn init(
         self: *Game,
@@ -61,8 +92,14 @@ pub const Game = struct {
         caps: world_mod.WorldCaps,
         window_w: i32,
         window_h: i32,
-        seed: u64,
+        seed_source: SeedSource,
+        mode: Mode,
     ) !void {
+        const seed: u64 = switch (seed_source) {
+            .literal => |v| v,
+            .replayer => |rp| rp.seed,
+        };
+
         self.gpa = gpa;
         self.frame_arena = std.heap.ArenaAllocator.init(gpa);
         errdefer self.frame_arena.deinit();
@@ -85,6 +122,7 @@ pub const Game = struct {
         errdefer self.world.deinit(gpa);
 
         self.world.player = world_mod.Player.init(bounds);
+        self.prev_player_pos = self.world.player.pos;
 
         self.input = world_mod.Input.zero;
         self.accumulator = 0;
@@ -94,6 +132,8 @@ pub const Game = struct {
         self.fire_cooldown = 0;
         self.window_w = window_w;
         self.window_h = window_h;
+        self.mode = mode;
+        self.should_exit = false;
 
         self.asset_root = try resolveAssetRoot(gpa);
         errdefer gpa.free(self.asset_root);
@@ -119,6 +159,26 @@ pub const Game = struct {
 
     pub fn frame(self: *Game) !void {
         _ = self.frame_arena.reset(.retain_capacity);
+        switch (self.mode) {
+            .replay_speed => |rep| {
+                try self.frameReplaySpeed(rep);
+                return;
+            },
+            .replay_watch => |rep| {
+                if (rl.windowShouldClose()) {
+                    self.should_exit = true;
+                    return;
+                }
+                try self.frameReplayWatch(rep);
+                return;
+            },
+            .normal, .record => {
+                if (rl.windowShouldClose()) {
+                    self.should_exit = true;
+                    return;
+                }
+            },
+        }
         self.input = pollInput();
         switch (self.state) {
             .attract => try self.frameAttract(),
@@ -126,6 +186,42 @@ pub const Game = struct {
             .paused => |*p| self.framePaused(p),
             .game_over => |*g| self.frameGameOver(g),
         }
+    }
+
+    /// Headless replay: pure sim, no audio/render/particles/shake. The trace
+    /// captures only `playing`-state ticks (and only the first session), so
+    /// jump straight there on the first tick and stop when exhausted.
+    fn frameReplaySpeed(self: *Game, rep: *Replayer) !void {
+        if (self.state == .attract) {
+            self.state = .{ .playing = state_mod.fresh() };
+            try self.loadLevel(0);
+        }
+        while (try rep.nextTick()) |input| {
+            systems.simTick(&self.world, &self.audio, &self.shake, input, sim_dt);
+        }
+        self.should_exit = true;
+    }
+
+    /// Visual replay: one recorded tick per frame, full rendering, no
+    /// accumulator. raylib's `setTargetFPS(60)` paces the loop to sim_dt.
+    fn frameReplayWatch(self: *Game, rep: *Replayer) !void {
+        if (self.state == .attract) {
+            self.state = .{ .playing = state_mod.fresh() };
+            try self.loadLevel(0);
+        }
+        const maybe = try rep.nextTick();
+        if (maybe) |input| {
+            self.prev_player_pos = self.world.player.pos;
+            systems.simTick(&self.world, &self.audio, &self.shake, input, sim_dt);
+        } else {
+            self.should_exit = true;
+        }
+        const frame_dt = rl.getFrameTime();
+        systems.updateParticles(&self.world, frame_dt);
+        self.shake.update(frame_dt);
+        self.audio.updateMusic(frame_dt);
+        _ = self.audio.flush();
+        self.drawCurrent();
     }
 
     fn frameAttract(self: *Game) !void {
@@ -158,7 +254,15 @@ pub const Game = struct {
 
             if (self.world.player.dead) {
                 p.death_pause = state_mod.death_pause_s;
+                // Finalize on first death: a trace crossing a death/respawn
+                // boundary can't be replayed correctly (world state resets but
+                // the replay path calls simTick directly). Covering one life is
+                // safe and sufficient.
+                self.finalizeRecording();
             } else if (self.world.enemies.len() == 0) {
+                // Finalize before level clear for the same reason: loadLevel
+                // resets world state the replay path can't reconstruct.
+                self.finalizeRecording();
                 const next_index: u8 = (p.level_index + 1) % levels_mod.level_count;
                 p.level_index = next_index;
                 p.level_timer = 0;
@@ -217,6 +321,11 @@ pub const Game = struct {
             .rotation = 0,
             .zoom = zoom,
         };
+        // Fixed-timestep alias kill: lerp player draw position from the
+        // pre-tick snapshot to the post-tick state. Render-only — sim never
+        // sees `alpha`, so determinism / replay are unaffected.
+        const alpha = drawAlpha(self.mode, self.accumulator);
+        const draw_player_pos = Vec2.lerp(self.prev_player_pos, self.world.player.pos, alpha);
 
         rl.beginDrawing();
         defer rl.endDrawing();
@@ -237,7 +346,7 @@ pub const Game = struct {
             drawBullets(&self.world);
             drawEnemyBullets(&self.world);
             drawParticles(&self.world);
-            if (!self.world.player.dead) drawPlayer(&self.world);
+            if (!self.world.player.dead) drawPlayer(draw_player_pos);
         }
 
         switch (self.state) {
@@ -259,14 +368,28 @@ pub const Game = struct {
         if (p.lives > 0) p.lives -= 1;
         if (p.lives == 0) {
             self.state = .{ .game_over = .{ .final_score = p.score, .timer_s = state_mod.game_over_s } };
+            self.finalizeRecording();
             return true;
         }
         // Respawn: revive player + scrub stale projectiles/particles. Enemies stay.
         self.world.player = world_mod.Player.init(self.world.bounds);
+        self.prev_player_pos = self.world.player.pos;
         self.world.bullets.clearActive();
         self.world.enemy_bullets.clearActive();
         self.world.particles.clearActive();
         return false;
+    }
+
+    fn finalizeRecording(self: *Game) void {
+        switch (self.mode) {
+            .record => |*rm| if (!rm.finished) {
+                rm.recorder.finalize() catch |err| {
+                    std.log.warn("record: finalize failed: {s}", .{@errorName(err)});
+                };
+                rm.finished = true;
+            },
+            else => {},
+        }
     }
 
     /// Hard reset for a level boundary. Step order matters:
@@ -287,6 +410,7 @@ pub const Game = struct {
         const def = try levels_mod.loadLevelDef(self.perm_arena.allocator(), self.asset_root, level_index);
 
         self.world.player = world_mod.Player.init(self.world.bounds);
+        self.prev_player_pos = self.world.player.pos;
         levels_mod.spawn(&self.world, def);
 
         self.audio.playMusic(def.music_track);
@@ -300,6 +424,22 @@ pub const Game = struct {
         var ticks: u32 = 0;
         while (self.accumulator >= sim_dt and ticks < max_ticks_per_frame) {
             const gated = self.gateInput(input);
+            // One record per sim tick, not per frame. A 33ms frame draining two
+            // ticks writes two identical-payload records — replay drives each
+            // tick separately.
+            switch (self.mode) {
+                .record => |*rm| if (!rm.finished and self.state == .playing) {
+                    rm.recorder.writeTick(gated) catch |err| {
+                        // Stop recording rather than silently continuing past a
+                        // failed write — a partial trace is worse than none.
+                        std.log.warn("record: writeTick failed ({s}), stopping", .{@errorName(err)});
+                        rm.recorder.finalize() catch {};
+                        rm.finished = true;
+                    };
+                },
+                else => {},
+            }
+            self.prev_player_pos = self.world.player.pos;
             systems.simTick(&self.world, &self.audio, &self.shake, gated, sim_dt);
             self.accumulator -= sim_dt;
             ticks += 1;
@@ -360,8 +500,18 @@ fn pollInput() world_mod.Input {
     return .{ .thrust = thrust, .fire = rl.isKeyDown(.space) };
 }
 
-fn drawPlayer(world: *const world_mod.World) void {
-    const pos = world.player.pos;
+/// Replay modes drive exactly one sim tick per frame with no accumulator
+/// carry, so live-play's `accumulator / sim_dt` lerp factor is meaningless —
+/// it would render the player one tick behind the simulated state. Return 1
+/// in those modes so `Vec2.lerp` picks `cur_pos` directly.
+fn drawAlpha(mode: Mode, accumulator: f32) f32 {
+    return switch (mode) {
+        .replay_watch, .replay_speed => 1.0,
+        .normal, .record => std.math.clamp(accumulator / sim_dt, 0, 1),
+    };
+}
+
+fn drawPlayer(pos: Vec2) void {
     rl.drawTriangle(
         .{ .x = pos.x, .y = pos.y - player_size },
         .{ .x = pos.x - player_size, .y = pos.y + player_size },
@@ -485,7 +635,7 @@ fn drawGameOverOverlay(window_w: i32, window_h: i32, g: GameOver) void {
 
 test "runSimTicks caps catch-up after a large frame stall" {
     var game: Game = undefined;
-    try game.init(std.testing.allocator, .{}, 800, 600, 123);
+    try game.init(std.testing.allocator, .{}, 800, 600, .{ .literal = 123 }, .normal);
     defer game.deinit();
 
     const before = game.world.player.pos.x;
@@ -496,19 +646,89 @@ test "runSimTicks caps catch-up after a large frame stall" {
     try std.testing.expectApproxEqAbs(expected, game.world.player.pos.x, 0.000_001);
 }
 
+test "prev_player_pos enables continuous draw-pos across 0-tick / 2-tick alias" {
+    var game: Game = undefined;
+    try game.init(std.testing.allocator, .{}, 800, 600, .{ .literal = 123 }, .normal);
+    defer game.deinit();
+
+    const input: world_mod.Input = .{ .thrust = .{ .x = 1, .y = 0 }, .fire = false };
+
+    // Frame 1: slightly-fast frame, no tick runs. Accumulator carries.
+    const fast_dt: f32 = sim_dt * 0.9;
+    const cur_before = game.world.player.pos;
+    game.runSimTicks(input, fast_dt);
+    try std.testing.expectEqual(cur_before, game.world.player.pos);
+    const alpha_fast = std.math.clamp(game.accumulator / sim_dt, 0, 1);
+    const draw_fast = Vec2.lerp(game.prev_player_pos, game.world.player.pos, alpha_fast);
+    try std.testing.expectEqual(cur_before.x, draw_fast.x);
+
+    // Frame 2: slightly-slow frame, two ticks run. Without interpolation the
+    // player jumps 2*sim_dt*speed; with the lerp the draw position should fall
+    // smoothly between the pre-second-tick snapshot and the post-second-tick
+    // pos by `alpha` of one tick's worth of motion.
+    const slow_dt: f32 = sim_dt * 1.1;
+    game.runSimTicks(input, slow_dt);
+    const ticks_per_frame_speed: f32 = 300 * sim_dt;
+    const alpha_slow = std.math.clamp(game.accumulator / sim_dt, 0, 1);
+    const draw_slow = Vec2.lerp(game.prev_player_pos, game.world.player.pos, alpha_slow);
+    // Draw position must advance from frame 1 to frame 2 by less than two
+    // ticks' worth — i.e. the lerp killed the 2x jump.
+    const naive_jump = 2 * ticks_per_frame_speed;
+    try std.testing.expect(draw_slow.x - draw_fast.x < naive_jump);
+    // And by more than zero — we're still making progress.
+    try std.testing.expect(draw_slow.x > draw_fast.x);
+}
+
+test "drawAlpha forces 1.0 in replay modes, follows accumulator in normal/record" {
+    // Live-play modes scale alpha with the leftover accumulator.
+    try std.testing.expectEqual(@as(f32, 0), drawAlpha(.normal, 0));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), drawAlpha(.normal, sim_dt * 0.5), 0.000_001);
+    try std.testing.expectEqual(@as(f32, 1), drawAlpha(.normal, sim_dt));
+    try std.testing.expectEqual(@as(f32, 1), drawAlpha(.normal, sim_dt * 5)); // clamped
+
+    // Replay modes never touch the accumulator, so alpha must be 1 regardless
+    // — otherwise the lerp would render the player one tick behind cur_pos.
+    var dummy_replayer: Replayer = undefined;
+    try std.testing.expectEqual(@as(f32, 1), drawAlpha(.{ .replay_watch = &dummy_replayer }, 0));
+    try std.testing.expectEqual(@as(f32, 1), drawAlpha(.{ .replay_watch = &dummy_replayer }, sim_dt * 0.5));
+    try std.testing.expectEqual(@as(f32, 1), drawAlpha(.{ .replay_speed = &dummy_replayer }, 0));
+}
+
+test "finalizeRecording is idempotent and survives no-record mode" {
+    var game: Game = undefined;
+    try game.init(std.testing.allocator, .{}, 800, 600, .{ .literal = 1 }, .normal);
+    defer game.deinit();
+
+    // Normal mode: no-op, doesn't crash.
+    game.finalizeRecording();
+
+    // Switch to record mode with a stub recorder backed by a tmp file.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var recorder = try @import("replay.zig").Recorder.open(tmp.dir, std.testing.io, "trace.zrpl", 1);
+    defer recorder.close();
+    game.mode = .{ .record = .{ .recorder = &recorder } };
+
+    game.finalizeRecording();
+    try std.testing.expect(game.mode.record.finished);
+    // Second call is a no-op; nothing throws and the flag stays set.
+    game.finalizeRecording();
+    try std.testing.expect(game.mode.record.finished);
+}
+
 test "Game init cleans up after allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, initGameForFailureTest, .{});
 }
 
 fn initGameForFailureTest(allocator: std.mem.Allocator) !void {
     var game: Game = undefined;
-    try game.init(allocator, .{}, 800, 600, 123);
+    try game.init(allocator, .{}, 800, 600, .{ .literal = 123 }, .normal);
     game.deinit();
 }
 
 test "fire cooldown gates bullets to one per cooldown window" {
     var game: Game = undefined;
-    try game.init(std.testing.allocator, .{}, 800, 600, 99);
+    try game.init(std.testing.allocator, .{}, 800, 600, .{ .literal = 99 }, .normal);
     defer game.deinit();
 
     const start_len = game.world.bullets.len();
@@ -524,7 +744,7 @@ test "fire cooldown gates bullets to one per cooldown window" {
 
 test "Game starts in attract state" {
     var game: Game = undefined;
-    try game.init(std.testing.allocator, .{}, 800, 600, 7);
+    try game.init(std.testing.allocator, .{}, 800, 600, .{ .literal = 7 }, .normal);
     defer game.deinit();
 
     try std.testing.expect(std.meta.activeTag(game.state) == .attract);
@@ -532,7 +752,7 @@ test "Game starts in attract state" {
 
 test "loadLevel populates enemies and invalidates prior handles" {
     var game: Game = undefined;
-    try game.init(std.testing.allocator, .{}, 800, 600, 11);
+    try game.init(std.testing.allocator, .{}, 800, 600, .{ .literal = 11 }, .normal);
     defer game.deinit();
 
     try game.loadLevel(0);
@@ -552,7 +772,7 @@ test "loadLevel populates enemies and invalidates prior handles" {
 
 test "loadLevel keeps perm_arena capacity stable across reloads" {
     var game: Game = undefined;
-    try game.init(std.testing.allocator, .{}, 800, 600, 13);
+    try game.init(std.testing.allocator, .{}, 800, 600, .{ .literal = 13 }, .normal);
     defer game.deinit();
 
     try game.loadLevel(0);
@@ -578,7 +798,7 @@ test "Playing.score accumulates across simulated kills" {
 
 test "state transition table: attract+key, pause toggle, death paths, game_over expiry" {
     var game: Game = undefined;
-    try game.init(std.testing.allocator, .{}, 800, 600, 17);
+    try game.init(std.testing.allocator, .{}, 800, 600, .{ .literal = 17 }, .normal);
     defer game.deinit();
 
     // attract → playing via loadLevel
