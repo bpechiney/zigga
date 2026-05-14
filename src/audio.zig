@@ -187,7 +187,23 @@ pub const Audio = struct {
     }
 
     pub fn stopMusic(self: *Audio) void {
-        if (self.music.fade_mode == .crossfade) self.finalizeCrossfade();
+        // Mid-crossfade: don't call finalizeCrossfade — its promotion forces
+        // `current_volume = 1`, which jumps the incoming track to full before
+        // the fade-out ramps it down. Drop the outgoing stream and promote
+        // `next` at its partial volume so the listener hears a clean ramp from
+        // wherever the crossfade had landed.
+        if (self.music.fade_mode == .crossfade) {
+            if (self.music.current) |old| {
+                if (self.playback_enabled) rl.unloadMusicStream(old);
+            }
+            self.music.current = self.music.next;
+            self.music.current_track = self.music.next_track;
+            self.music.current_volume = self.music.next_volume;
+            self.music.next = null;
+            self.music.next_track = .none;
+            self.music.next_volume = 0;
+            self.music.fade_mode = .none;
+        }
         // Empty-check via `current_track`, not `current`: with `playback_enabled
         // = false` the stream handle is always null but the track + fade state
         // still progress, and the test harness exercises exactly that path.
@@ -196,7 +212,8 @@ pub const Audio = struct {
             return;
         }
         // Snapshot the live volume so the fade-out ramps from wherever we are
-        // (e.g. mid fade-in at 0.4) instead of jumping back to 1.0 first.
+        // (e.g. mid fade-in at 0.4, or mid-crossfade at 0.4) instead of
+        // jumping back to 1.0 first.
         self.music.current_fade_start = self.music.current_volume;
         self.music.fade_mode = .fade_out;
         self.music.crossfade_t = 0;
@@ -521,6 +538,37 @@ test "Audio.stopMusic during fade_in ramps from the partial volume, no jump" {
     // Completing the fade clears state.
     audio.updateMusic(crossfade_duration_s);
     try std.testing.expectEqual(MusicTrack.none, audio.music.current_track);
+}
+
+test "Audio.stopMusic during crossfade fades the incoming track from its partial volume" {
+    var audio: Audio = undefined;
+    audio.init();
+    defer audio.deinit();
+
+    // Force a mid-crossfade state directly. With playback disabled there are
+    // no real streams, but the volume bookkeeping is what we're testing.
+    audio.music.current_track = .level_1;
+    audio.music.current_volume = 0.6;
+    audio.music.current_fade_start = 1.0;
+    audio.music.next_track = .level_2;
+    audio.music.next_volume = 0.4;
+    audio.music.fade_mode = .crossfade;
+    audio.music.crossfade_t = crossfade_duration_s * 0.4;
+
+    audio.stopMusic();
+
+    // Incoming track is promoted to current at its partial volume — no jump.
+    try std.testing.expect(audio.music.fade_mode == .fade_out);
+    try std.testing.expectEqual(MusicTrack.level_2, audio.music.current_track);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), audio.music.current_volume, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), audio.music.current_fade_start, 1e-5);
+    try std.testing.expectEqual(MusicTrack.none, audio.music.next_track);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), audio.music.next_volume, 1e-5);
+
+    // Ramping completes cleanly at 0.
+    audio.updateMusic(crossfade_duration_s);
+    try std.testing.expectEqual(MusicTrack.none, audio.music.current_track);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), audio.music.current_volume, 1e-5);
 }
 
 test "Audio.stopMusic kicks off a fade_out from a settled state" {
