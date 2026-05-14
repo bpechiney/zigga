@@ -63,6 +63,11 @@ pub const Game = struct {
     world: world_mod.World,
     input: world_mod.Input,
     accumulator: f32,
+    /// `world.player.pos` immediately before the most recent sim tick.
+    /// `drawCurrent` lerps from prev → cur with `alpha = accumulator / sim_dt`
+    /// so the player isn't visually quantized into sim_dt jumps when
+    /// `frame_dt` straddles the boundary. Render-only — replay-irrelevant.
+    prev_player_pos: Vec2,
     audio: Audio,
     shake: Shake,
     state: State,
@@ -117,6 +122,7 @@ pub const Game = struct {
         errdefer self.world.deinit(gpa);
 
         self.world.player = world_mod.Player.init(bounds);
+        self.prev_player_pos = self.world.player.pos;
 
         self.input = world_mod.Input.zero;
         self.accumulator = 0;
@@ -306,6 +312,11 @@ pub const Game = struct {
             .rotation = 0,
             .zoom = zoom,
         };
+        // Fixed-timestep alias kill: lerp player draw position from the
+        // pre-tick snapshot to the post-tick state. Render-only — sim never
+        // sees `alpha`, so determinism / replay are unaffected.
+        const alpha = std.math.clamp(self.accumulator / sim_dt, 0, 1);
+        const draw_player_pos = Vec2.lerp(self.prev_player_pos, self.world.player.pos, alpha);
 
         rl.beginDrawing();
         defer rl.endDrawing();
@@ -326,7 +337,7 @@ pub const Game = struct {
             drawBullets(&self.world);
             drawEnemyBullets(&self.world);
             drawParticles(&self.world);
-            if (!self.world.player.dead) drawPlayer(&self.world);
+            if (!self.world.player.dead) drawPlayer(draw_player_pos);
         }
 
         switch (self.state) {
@@ -363,6 +374,7 @@ pub const Game = struct {
         }
         // Respawn: revive player + scrub stale projectiles/particles. Enemies stay.
         self.world.player = world_mod.Player.init(self.world.bounds);
+        self.prev_player_pos = self.world.player.pos;
         self.world.bullets.clearActive();
         self.world.enemy_bullets.clearActive();
         self.world.particles.clearActive();
@@ -387,6 +399,7 @@ pub const Game = struct {
         const def = try levels_mod.loadLevelDef(self.perm_arena.allocator(), self.asset_root, level_index);
 
         self.world.player = world_mod.Player.init(self.world.bounds);
+        self.prev_player_pos = self.world.player.pos;
         levels_mod.spawn(&self.world, def);
 
         self.audio.playMusic(def.music_track);
@@ -411,6 +424,7 @@ pub const Game = struct {
                 },
                 else => {},
             }
+            self.prev_player_pos = self.world.player.pos;
             systems.simTick(&self.world, &self.audio, &self.shake, gated, sim_dt);
             self.accumulator -= sim_dt;
             ticks += 1;
@@ -471,8 +485,7 @@ fn pollInput() world_mod.Input {
     return .{ .thrust = thrust, .fire = rl.isKeyDown(.space) };
 }
 
-fn drawPlayer(world: *const world_mod.World) void {
-    const pos = world.player.pos;
+fn drawPlayer(pos: Vec2) void {
     rl.drawTriangle(
         .{ .x = pos.x, .y = pos.y - player_size },
         .{ .x = pos.x - player_size, .y = pos.y + player_size },
@@ -605,6 +618,39 @@ test "runSimTicks caps catch-up after a large frame stall" {
     try std.testing.expect(game.accumulator < sim_dt);
     const expected = before + max_ticks_per_frame * 300 * sim_dt;
     try std.testing.expectApproxEqAbs(expected, game.world.player.pos.x, 0.000_001);
+}
+
+test "prev_player_pos enables continuous draw-pos across 0-tick / 2-tick alias" {
+    var game: Game = undefined;
+    try game.init(std.testing.allocator, .{}, 800, 600, .{ .literal = 123 }, .normal);
+    defer game.deinit();
+
+    const input: world_mod.Input = .{ .thrust = .{ .x = 1, .y = 0 }, .fire = false };
+
+    // Frame 1: slightly-fast frame, no tick runs. Accumulator carries.
+    const fast_dt: f32 = sim_dt * 0.9;
+    const cur_before = game.world.player.pos;
+    game.runSimTicks(input, fast_dt);
+    try std.testing.expectEqual(cur_before, game.world.player.pos);
+    const alpha_fast = std.math.clamp(game.accumulator / sim_dt, 0, 1);
+    const draw_fast = Vec2.lerp(game.prev_player_pos, game.world.player.pos, alpha_fast);
+    try std.testing.expectEqual(cur_before.x, draw_fast.x);
+
+    // Frame 2: slightly-slow frame, two ticks run. Without interpolation the
+    // player jumps 2*sim_dt*speed; with the lerp the draw position should fall
+    // smoothly between the pre-second-tick snapshot and the post-second-tick
+    // pos by `alpha` of one tick's worth of motion.
+    const slow_dt: f32 = sim_dt * 1.1;
+    game.runSimTicks(input, slow_dt);
+    const ticks_per_frame_speed: f32 = 300 * sim_dt;
+    const alpha_slow = std.math.clamp(game.accumulator / sim_dt, 0, 1);
+    const draw_slow = Vec2.lerp(game.prev_player_pos, game.world.player.pos, alpha_slow);
+    // Draw position must advance from frame 1 to frame 2 by less than two
+    // ticks' worth — i.e. the lerp killed the 2x jump.
+    const naive_jump = 2 * ticks_per_frame_speed;
+    try std.testing.expect(draw_slow.x - draw_fast.x < naive_jump);
+    // And by more than zero — we're still making progress.
+    try std.testing.expect(draw_slow.x > draw_fast.x);
 }
 
 test "Game init cleans up after allocation failures" {
