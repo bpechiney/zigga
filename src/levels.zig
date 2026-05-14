@@ -24,6 +24,7 @@ pub const ValidateError = error{
 pub const LoadError = error{
     FileNotFound,
     LoadFailed,
+    PathTooLong,
     ParseZon,
 } || ValidateError || std.mem.Allocator.Error;
 
@@ -52,12 +53,14 @@ pub fn loadLevelDef(
     // file. Setting it here is idempotent and global.
     rl.setTraceLogLevel(.warning);
 
-    var path_buf: [256]u8 = undefined;
+    // Use the OS PATH_MAX so deep install prefixes still fit; overflow surfaces
+    // as an explicit PathTooLong instead of mis-mapping to FileNotFound.
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrintZ(
         &path_buf,
         "{s}levels/{d:0>2}.zon",
         .{ asset_root, level_index + 1 },
-    ) catch return error.FileNotFound;
+    ) catch return error.PathTooLong;
     if (!rl.fileExists(path)) return error.FileNotFound;
 
     const raw = rl.loadFileText(path);
@@ -89,6 +92,16 @@ pub fn validateLevelDef(def: LevelDef) ValidateError!void {
 pub fn spawn(world: *World, def: LevelDef) void {
     world.dive_chance_per_tick = world_mod.sim_dt / def.dive_interval;
     world.spawnFormation(def.formation, def.enemy_kinds);
+}
+
+test "loadLevelDef returns PathTooLong when the asset root overflows PATH_MAX" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var long_root_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    @memset(&long_root_buf, 'x');
+    long_root_buf[long_root_buf.len - 1] = '/';
+    const long_root: []const u8 = &long_root_buf;
+    try std.testing.expectError(error.PathTooLong, loadLevelDef(arena.allocator(), long_root, 0));
 }
 
 test "loadLevelDef parses level 01" {

@@ -40,11 +40,15 @@ const FadeMode = enum { none, crossfade, fade_in, fade_out };
 
 /// Music streaming and crossfade ramp state. Three fade modes:
 ///   - fade_in:   current ramps 0→1; no `next`.
-///   - crossfade: current ramps 1→0, next ramps 0→1; promote `next` at the end.
-///   - fade_out:  current ramps 1→0; unload at the end.
+///   - crossfade: current ramps start→0, next ramps 0→1; promote `next` at the end.
+///   - fade_out:  current ramps start→0; unload at the end.
+/// `current_fade_start` is the value `current_volume` had when the active fade
+/// began — so `stopMusic` mid-fade-in ramps from the current partial value
+/// down to 0 instead of jumping back to full volume first.
 pub const MusicState = struct {
     current: ?rl.Music = null,
     current_volume: f32 = 0,
+    current_fade_start: f32 = 0,
     current_track: MusicTrack = .none,
     next: ?rl.Music = null,
     next_volume: f32 = 0,
@@ -64,13 +68,12 @@ pub const Audio = struct {
     base_volume: std.EnumArray(Tag, f32),
     music: MusicState,
     playback_enabled: bool,
-    /// Runtime-overridable prefixes; `Audio.init` seeds them with the cwd-relative
-    /// defaults, and `Game.init` calls `setAssetRoots` once an exe-relative path
-    /// resolves. Stored inline so Audio doesn't borrow into Game's lifetime.
-    sfx_prefix_buf: [128]u8 = undefined,
-    sfx_prefix_len: usize,
-    music_prefix_buf: [128]u8 = undefined,
-    music_prefix_len: usize,
+    /// Borrowed prefixes — the owning `Game` keeps the backing storage alive
+    /// for Audio's lifetime, so no fixed buffers / silent truncation here.
+    /// `Audio.init` seeds them with the cwd-relative defaults; `setAssetRoots`
+    /// swaps in `Game`'s allocator-owned paths after `Game.init` resolves them.
+    sfx_prefix: []const u8,
+    music_prefix: []const u8,
 
     pub fn init(self: *Audio) void {
         self.pending = std.ArrayList(Event).initBuffer(&self.pending_buf);
@@ -81,26 +84,17 @@ pub const Audio = struct {
         self.base_volume = std.EnumArray(Tag, f32).initFill(default_base_volume);
         self.music = .{};
         self.playback_enabled = false;
-        copyPrefix(&self.sfx_prefix_buf, &self.sfx_prefix_len, default_sfx_prefix);
-        copyPrefix(&self.music_prefix_buf, &self.music_prefix_len, default_music_prefix);
-        self.resolveSfxSources(self.sfxPrefix());
+        self.sfx_prefix = default_sfx_prefix;
+        self.music_prefix = default_music_prefix;
+        self.resolveSfxSources(self.sfx_prefix);
     }
 
-    /// Override the asset roots at runtime (e.g. once `Game` has resolved an
-    /// exe-relative path) and re-resolve SFX fallback flags against the new
-    /// path. Trailing slash required on both prefixes.
+    /// Borrow the caller-owned asset prefixes (no copy). The caller must keep
+    /// the backing storage valid until Audio.deinit. Trailing slash required.
     pub fn setAssetRoots(self: *Audio, sfx_prefix: []const u8, music_prefix: []const u8) void {
-        copyPrefix(&self.sfx_prefix_buf, &self.sfx_prefix_len, sfx_prefix);
-        copyPrefix(&self.music_prefix_buf, &self.music_prefix_len, music_prefix);
-        self.resolveSfxSources(self.sfxPrefix());
-    }
-
-    fn sfxPrefix(self: *const Audio) []const u8 {
-        return self.sfx_prefix_buf[0..self.sfx_prefix_len];
-    }
-
-    fn musicPrefix(self: *const Audio) []const u8 {
-        return self.music_prefix_buf[0..self.music_prefix_len];
+        self.sfx_prefix = sfx_prefix;
+        self.music_prefix = music_prefix;
+        self.resolveSfxSources(self.sfx_prefix);
     }
 
     pub fn deinit(self: *Audio) void {
@@ -141,7 +135,7 @@ pub const Audio = struct {
     pub fn enablePlayback(self: *Audio) void {
         self.playback_enabled = true;
         const sample_rate: u32 = 22_050;
-        const prefix = self.sfxPrefix();
+        const prefix = self.sfx_prefix;
         inline for (@typeInfo(Tag).@"enum".fields) |field| {
             const tag = @field(Tag, field.name);
             self.sounds.set(tag, loadSfx(tag, self.use_fallback.get(tag), prefix, sample_rate));
@@ -168,7 +162,7 @@ pub const Audio = struct {
         if (self.music.fade_mode == .none and self.music.current_track == track) return;
         if (self.music.fade_mode != .none) self.finalizeCrossfade();
 
-        const incoming: ?rl.Music = if (self.playback_enabled) loadMusicTrack(self.musicPrefix(), track) else null;
+        const incoming: ?rl.Music = if (self.playback_enabled) loadMusicTrack(self.music_prefix, track) else null;
         if (incoming) |m| {
             rl.playMusicStream(m);
             rl.setMusicVolume(m, 0);
@@ -178,12 +172,15 @@ pub const Audio = struct {
             self.music.current = incoming;
             self.music.current_track = track;
             self.music.current_volume = 0;
+            self.music.current_fade_start = 0;
             self.music.fade_mode = .fade_in;
         } else {
             self.music.next = incoming;
             self.music.next_track = track;
             self.music.next_volume = 0;
-            self.music.current_volume = 1;
+            // Capture the partial volume so crossfades that follow a mid-fade-in
+            // start from the actual current value, not a hard-coded 1.0.
+            self.music.current_fade_start = self.music.current_volume;
             self.music.fade_mode = .crossfade;
         }
         self.music.crossfade_t = 0;
@@ -191,10 +188,16 @@ pub const Audio = struct {
 
     pub fn stopMusic(self: *Audio) void {
         if (self.music.fade_mode == .crossfade) self.finalizeCrossfade();
-        if (self.music.current == null) {
+        // Empty-check via `current_track`, not `current`: with `playback_enabled
+        // = false` the stream handle is always null but the track + fade state
+        // still progress, and the test harness exercises exactly that path.
+        if (self.music.current_track == .none and self.music.fade_mode == .none) {
             self.music = .{};
             return;
         }
+        // Snapshot the live volume so the fade-out ramps from wherever we are
+        // (e.g. mid fade-in at 0.4) instead of jumping back to 1.0 first.
+        self.music.current_fade_start = self.music.current_volume;
         self.music.fade_mode = .fade_out;
         self.music.crossfade_t = 0;
     }
@@ -223,14 +226,15 @@ pub const Audio = struct {
     fn advanceFade(self: *Audio, frame_dt: f32) void {
         self.music.crossfade_t = @min(self.music.crossfade_s, self.music.crossfade_t + frame_dt);
         const ratio = self.music.crossfade_t / self.music.crossfade_s;
+        const start = self.music.current_fade_start;
         switch (self.music.fade_mode) {
             .none => {},
             .fade_in => self.music.current_volume = ratio,
             .crossfade => {
-                self.music.current_volume = 1.0 - ratio;
+                self.music.current_volume = start * (1.0 - ratio);
                 self.music.next_volume = ratio;
             },
-            .fade_out => self.music.current_volume = 1.0 - ratio,
+            .fade_out => self.music.current_volume = start * (1.0 - ratio),
         }
         if (self.music.crossfade_t >= self.music.crossfade_s) self.finalizeCrossfade();
     }
@@ -341,14 +345,16 @@ fn placeholderFreq(tag: Tag) f32 {
 }
 
 fn sfxFileExists(prefix: []const u8, name: []const u8) bool {
-    var path_buf: [256]u8 = undefined;
+    // PATH_MAX so deep install prefixes still resolve. Overflow falls back to
+    // the placeholder wave — same outcome as a missing file from raylib's view.
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrintZ(&path_buf, "{s}{s}.wav", .{ prefix, name }) catch return false;
     return rl.fileExists(path);
 }
 
 fn loadSfx(tag: Tag, use_fallback: bool, prefix: []const u8, sample_rate: u32) rl.Sound {
     if (use_fallback) return loadPlaceholder(tag, sample_rate);
-    var path_buf: [256]u8 = undefined;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrintZ(
         &path_buf,
         "{s}{s}.wav",
@@ -358,12 +364,6 @@ fn loadSfx(tag: Tag, use_fallback: bool, prefix: []const u8, sample_rate: u32) r
         std.log.warn("audio: load failed for {s}, falling back", .{path});
         return loadPlaceholder(tag, sample_rate);
     };
-}
-
-fn copyPrefix(buf: []u8, len: *usize, value: []const u8) void {
-    const n = @min(value.len, buf.len);
-    @memcpy(buf[0..n], value[0..n]);
-    len.* = n;
 }
 
 fn loadPlaceholder(tag: Tag, sample_rate: u32) rl.Sound {
@@ -381,7 +381,7 @@ fn loadMusicTrack(prefix: []const u8, track: MusicTrack) ?rl.Music {
         .level_2 => "level_2",
         .level_3 => "level_3",
     };
-    var path_buf: [256]u8 = undefined;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrintZ(
         &path_buf,
         "{s}{s}.ogg",
@@ -497,18 +497,48 @@ test "Audio fade ramps current_volume on fade_in" {
     try std.testing.expectEqual(MusicTrack.level_1, audio.music.current_track);
 }
 
+test "Audio.stopMusic during fade_in ramps from the partial volume, no jump" {
+    var audio: Audio = undefined;
+    audio.init();
+    defer audio.deinit();
+
+    audio.playMusic(.level_1);
+    try std.testing.expect(audio.music.fade_mode == .fade_in);
+    // Walk to ~40% of the fade-in ramp; current_volume should be ~0.4.
+    audio.updateMusic(crossfade_duration_s * 0.4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), audio.music.current_volume, 1e-5);
+
+    audio.stopMusic();
+    try std.testing.expect(audio.music.fade_mode == .fade_out);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), audio.music.current_fade_start, 1e-5);
+    // Immediately after the switch, volume must not have jumped back to 1.0.
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), audio.music.current_volume, 1e-5);
+
+    // Half-way through the fade-out, volume should be ~0.2 (0.4 * 0.5).
+    audio.updateMusic(crossfade_duration_s * 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), audio.music.current_volume, 1e-5);
+
+    // Completing the fade clears state.
+    audio.updateMusic(crossfade_duration_s);
+    try std.testing.expectEqual(MusicTrack.none, audio.music.current_track);
+}
+
 test "Audio.stopMusic kicks off a fade_out from a settled state" {
     var audio: Audio = undefined;
     audio.init();
     defer audio.deinit();
 
-    // Pretend we're already playing — no playback_enabled means no streams.
+    // Pretend we've finished a fade-in: a track is "playing" at full volume.
     audio.music.current_track = .level_1;
     audio.music.current_volume = 1;
+    audio.music.fade_mode = .none;
     audio.music.current = null; // no real stream but track is set
 
     audio.stopMusic();
-    // current was null, so stopMusic short-circuits to a clean state.
+    try std.testing.expect(audio.music.fade_mode == .fade_out);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), audio.music.current_fade_start, 1e-5);
+
+    audio.updateMusic(crossfade_duration_s);
     try std.testing.expectEqual(MusicTrack.none, audio.music.current_track);
 }
 
