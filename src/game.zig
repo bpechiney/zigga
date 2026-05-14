@@ -324,7 +324,7 @@ pub const Game = struct {
         // Fixed-timestep alias kill: lerp player draw position from the
         // pre-tick snapshot to the post-tick state. Render-only — sim never
         // sees `alpha`, so determinism / replay are unaffected.
-        const alpha = std.math.clamp(self.accumulator / sim_dt, 0, 1);
+        const alpha = drawAlpha(self.mode, self.accumulator);
         const draw_player_pos = Vec2.lerp(self.prev_player_pos, self.world.player.pos, alpha);
 
         rl.beginDrawing();
@@ -500,6 +500,17 @@ fn pollInput() world_mod.Input {
     return .{ .thrust = thrust, .fire = rl.isKeyDown(.space) };
 }
 
+/// Replay modes drive exactly one sim tick per frame with no accumulator
+/// carry, so live-play's `accumulator / sim_dt` lerp factor is meaningless —
+/// it would render the player one tick behind the simulated state. Return 1
+/// in those modes so `Vec2.lerp` picks `cur_pos` directly.
+fn drawAlpha(mode: Mode, accumulator: f32) f32 {
+    return switch (mode) {
+        .replay_watch, .replay_speed => 1.0,
+        .normal, .record => std.math.clamp(accumulator / sim_dt, 0, 1),
+    };
+}
+
 fn drawPlayer(pos: Vec2) void {
     rl.drawTriangle(
         .{ .x = pos.x, .y = pos.y - player_size },
@@ -666,6 +677,43 @@ test "prev_player_pos enables continuous draw-pos across 0-tick / 2-tick alias" 
     try std.testing.expect(draw_slow.x - draw_fast.x < naive_jump);
     // And by more than zero — we're still making progress.
     try std.testing.expect(draw_slow.x > draw_fast.x);
+}
+
+test "drawAlpha forces 1.0 in replay modes, follows accumulator in normal/record" {
+    // Live-play modes scale alpha with the leftover accumulator.
+    try std.testing.expectEqual(@as(f32, 0), drawAlpha(.normal, 0));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), drawAlpha(.normal, sim_dt * 0.5), 0.000_001);
+    try std.testing.expectEqual(@as(f32, 1), drawAlpha(.normal, sim_dt));
+    try std.testing.expectEqual(@as(f32, 1), drawAlpha(.normal, sim_dt * 5)); // clamped
+
+    // Replay modes never touch the accumulator, so alpha must be 1 regardless
+    // — otherwise the lerp would render the player one tick behind cur_pos.
+    var dummy_replayer: Replayer = undefined;
+    try std.testing.expectEqual(@as(f32, 1), drawAlpha(.{ .replay_watch = &dummy_replayer }, 0));
+    try std.testing.expectEqual(@as(f32, 1), drawAlpha(.{ .replay_watch = &dummy_replayer }, sim_dt * 0.5));
+    try std.testing.expectEqual(@as(f32, 1), drawAlpha(.{ .replay_speed = &dummy_replayer }, 0));
+}
+
+test "finalizeRecording is idempotent and survives no-record mode" {
+    var game: Game = undefined;
+    try game.init(std.testing.allocator, .{}, 800, 600, .{ .literal = 1 }, .normal);
+    defer game.deinit();
+
+    // Normal mode: no-op, doesn't crash.
+    game.finalizeRecording();
+
+    // Switch to record mode with a stub recorder backed by a tmp file.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var recorder = try @import("replay.zig").Recorder.open(tmp.dir, std.testing.io, "trace.zrpl", 1);
+    defer recorder.close();
+    game.mode = .{ .record = .{ .recorder = &recorder } };
+
+    game.finalizeRecording();
+    try std.testing.expect(game.mode.record.finished);
+    // Second call is a no-op; nothing throws and the flag stays set.
+    game.finalizeRecording();
+    try std.testing.expect(game.mode.record.finished);
 }
 
 test "Game init cleans up after allocation failures" {
